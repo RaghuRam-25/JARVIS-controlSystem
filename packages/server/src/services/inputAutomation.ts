@@ -22,6 +22,12 @@ export class InputAutomationService {
    * Detects Windows primary screen resolution
    */
   public detectScreenMetrics(): DisplayMetrics {
+    if (process.platform !== "win32") {
+      this.displayMetrics = { width: 1920, height: 1080, scaleFactor: 1 };
+      this.currentMouseX = 960;
+      this.currentMouseY = 540;
+      return this.displayMetrics;
+    }
     try {
       const output = execSync(
         `powershell -NoProfile -Command "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null; $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; Write-Output \\"$($s.Width),$($s.Height)\\""`,
@@ -52,6 +58,10 @@ export class InputAutomationService {
    * Persistent PowerShell session compiled with User32.dll SendInput for instant 0ms latency
    */
   private initFastInputProcess() {
+    if (process.platform !== "win32") {
+      return;
+    }
+
     const csharpCode = `
       using System;
       using System.Runtime.InteropServices;
@@ -112,6 +122,11 @@ export class InputAutomationService {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
+      this.psProcess.on("error", (err: any) => {
+        console.warn("PowerShell input process notice:", err.message);
+        this.psProcess = null;
+      });
+
       const setupScript = `
         Add-Type -TypeDefinition @"
         ${csharpCode}
@@ -119,10 +134,13 @@ export class InputAutomationService {
         Write-Output "READY"
       \n`;
 
-      this.psProcess.stdin.write(setupScript);
-      this.psProcess.stdin.uncork();
+      if (this.psProcess.stdin && !this.psProcess.stdin.destroyed) {
+        this.psProcess.stdin.write(setupScript);
+        this.psProcess.stdin.uncork();
+      }
     } catch (err) {
       console.warn("Failed to spawn persistent input process:", err);
+      this.psProcess = null;
     }
   }
 

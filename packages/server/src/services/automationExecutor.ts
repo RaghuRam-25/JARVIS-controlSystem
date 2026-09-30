@@ -59,7 +59,10 @@ export class AutomationExecutor {
     const { appName, displayName } = intent.payload;
     
     if (appName === "code") {
-      spawn("cmd", ["/c", "start", "code"], { detached: true, stdio: "ignore" });
+      const proc = process.platform === "win32"
+        ? spawn("cmd", ["/c", "start", "code"], { detached: true, stdio: "ignore" })
+        : spawn("code", [], { detached: true, stdio: "ignore" });
+      proc.on("error", () => {});
       return {
         intentId: intent.id,
         success: true,
@@ -70,11 +73,15 @@ export class AutomationExecutor {
 
     if (appName === "antigravity") {
       // Look for Antigravity executable or launch via command
-      spawn("cmd", ["/c", "start", "antigravity"], { detached: true, stdio: "ignore" }).on("error", () => {
+      const proc = process.platform === "win32"
+        ? spawn("cmd", ["/c", "start", "antigravity"], { detached: true, stdio: "ignore" })
+        : spawn("antigravity", [], { detached: true, stdio: "ignore" });
+      proc.on("error", () => {
         // Fallback to searching user profile
         const localApp = path.join(os.homedir(), "AppData", "Local", "Programs", "antigravity", "Antigravity.exe");
         if (fs.existsSync(localApp)) {
-          spawn(localApp, [], { detached: true, stdio: "ignore" });
+          const fallbackProc = spawn(localApp, [], { detached: true, stdio: "ignore" });
+          fallbackProc.on("error", () => {});
         }
       });
       return {
@@ -85,8 +92,11 @@ export class AutomationExecutor {
       };
     }
 
-    // Generic Windows launcher
-    spawn("cmd", ["/c", "start", appName], { detached: true, stdio: "ignore" });
+    // Generic launcher
+    const proc = process.platform === "win32"
+      ? spawn("cmd", ["/c", "start", appName], { detached: true, stdio: "ignore" })
+      : spawn(appName, [], { detached: true, stdio: "ignore" });
+    proc.on("error", () => {});
     return {
       intentId: intent.id,
       success: true,
@@ -118,8 +128,15 @@ export class AutomationExecutor {
       }
     }
 
+    const openWithCode = (target: string) => {
+      const proc = process.platform === "win32"
+        ? spawn("cmd", ["/c", "code", `"${target}"`], { detached: true, stdio: "ignore", shell: true })
+        : spawn("code", [target], { detached: true, stdio: "ignore" });
+      proc.on("error", () => {});
+    };
+
     if (fs.existsSync(targetPath)) {
-      spawn("cmd", ["/c", "code", `"${targetPath}"`], { detached: true, stdio: "ignore", shell: true });
+      openWithCode(targetPath);
       return {
         intentId: intent.id,
         success: true,
@@ -130,7 +147,7 @@ export class AutomationExecutor {
     }
 
     // Try opening as named folder
-    spawn("cmd", ["/c", "code", `"${projectName}"`], { detached: true, stdio: "ignore", shell: true });
+    openWithCode(projectName);
     return {
       intentId: intent.id,
       success: true,
@@ -240,7 +257,12 @@ export class AutomationExecutor {
     const { url } = intent.payload;
     
     // Launch default browser to YouTube search/video
-    spawn("cmd", ["/c", "start", `"${url}"`], { detached: true, stdio: "ignore", shell: true });
+    const proc = process.platform === "win32"
+      ? spawn("cmd", ["/c", "start", `"${url}"`], { detached: true, stdio: "ignore", shell: true })
+      : process.platform === "darwin"
+      ? spawn("open", [url], { detached: true, stdio: "ignore" })
+      : spawn("xdg-open", [url], { detached: true, stdio: "ignore" });
+    proc.on("error", () => {});
 
     return {
       intentId: intent.id,

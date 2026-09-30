@@ -20,7 +20,8 @@ export class TerminalManager extends EventEmitter {
    */
   public createSession(options: Partial<TerminalSpawn> = {}): TerminalInstance {
     const sessionId = options.sessionId || generateUUID();
-    const shell = options.shell || "powershell.exe";
+    const defaultShell = process.platform === "win32" ? "powershell.exe" : (process.env.SHELL || "bash");
+    const shell = options.shell || defaultShell;
     const cwd = options.cwd || process.cwd();
     const cols = options.cols || 100;
     const rows = options.rows || 30;
