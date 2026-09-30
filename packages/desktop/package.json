@@ -5,6 +5,7 @@
   "author": "JARVIS Engineering Team",
   "main": "./dist/main.js",
   "scripts": {
+    "prebuild": "npm run build --workspace=@jarvis/shared",
     "build": "tsc",
     "dev": "tsc && electron .",
     "start": "electron .",

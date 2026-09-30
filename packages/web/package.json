@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "prebuild": "npm run build --workspace=@jarvis/shared",
     "dev": "node ../../scripts/with-env.mjs next dev",
     "build": "node ../../scripts/with-env.mjs next build",
     "start": "node ../../scripts/with-env.mjs next start",
