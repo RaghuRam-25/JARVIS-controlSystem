@@ -56,6 +56,50 @@ const isNextServer =
   finalArgs.some((a) => a === "dev" || a === "start");
 const hasExplicitPort = finalArgs.some((a) => a === "-p" || a === "--port");
 
+function ensureNativeBinaries() {
+  const nodeModulesDirs = [
+    path.join(root, "node_modules"),
+    path.join(process.cwd(), "node_modules"),
+    path.join(root, "packages", "web", "node_modules"),
+  ];
+
+  const nativeFiles = new Map();
+  for (const nm of nodeModulesDirs) {
+    if (!fs.existsSync(nm)) continue;
+    try {
+      for (const entry of fs.readdirSync(nm)) {
+        if (entry.startsWith("lightningcss-") || entry.startsWith("@tailwindcss")) {
+          const entryPath = path.join(nm, entry);
+          if (fs.statSync(entryPath).isDirectory()) {
+            for (const file of fs.readdirSync(entryPath)) {
+              if (file.endsWith(".node")) {
+                nativeFiles.set(file, path.join(entryPath, file));
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  for (const nm of nodeModulesDirs) {
+    const lcssDir = path.join(nm, "lightningcss");
+    if (fs.existsSync(lcssDir)) {
+      for (const [filename, srcPath] of nativeFiles.entries()) {
+        const destPath = path.join(lcssDir, filename);
+        if (!fs.existsSync(destPath)) {
+          try {
+            fs.copyFileSync(srcPath, destPath);
+            console.log(`[with-env] Ensured native binary: ${filename}`);
+          } catch {}
+        }
+      }
+    }
+  }
+}
+
+ensureNativeBinaries();
+
 if (isNextServer && !hasExplicitPort) {
   const isProd = process.env.NODE_ENV === "production";
   const webPort = (isProd && process.env.PORT)
