@@ -2,8 +2,16 @@ node_modules/
 dist/
 build/
 out/
+release/
+packages/desktop/release/
 .next/
 .turbo/
+
+# Binaries & packages
+*.exe
+*.asar
+*.apk
+*.zip
 
 # Local environment / secrets
 .env

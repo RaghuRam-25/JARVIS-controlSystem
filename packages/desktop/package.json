@@ -27,7 +27,7 @@
     "productName": "JARVIS",
     "electronVersion": "30.0.9",
     "directories": {
-      "output": "dist/build"
+      "output": "release"
     },
     "files": [
       "dist/**/*",
@@ -38,12 +38,16 @@
       {
         "from": "../server/dist",
         "to": "server/dist",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../server/node_modules",
         "to": "server/node_modules",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../server/package.json",
@@ -52,12 +56,16 @@
       {
         "from": "../shared/dist",
         "to": "shared/dist",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../shared/node_modules",
         "to": "shared/node_modules",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../shared/package.json",
@@ -73,11 +81,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -89,7 +101,7 @@
       "uninstallDisplayName": "JARVIS Host PC"
     },
     "portable": {
-      "artifactName": "JARVIS.exe"
+      "artifactName": "JARVIS.${ext}"
     }
   }
 }

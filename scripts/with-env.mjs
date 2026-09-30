@@ -57,9 +57,12 @@ const isNextServer =
 const hasExplicitPort = finalArgs.some((a) => a === "-p" || a === "--port");
 
 if (isNextServer && !hasExplicitPort) {
-  const webPort = process.env.WEB_PORT || "3000";
+  const isProd = process.env.NODE_ENV === "production";
+  const webPort = (isProd && process.env.PORT)
+    ? process.env.PORT
+    : (process.env.WEB_PORT || process.env.PORT || "3000");
   finalArgs.push("-p", webPort);
-  console.log(`[with-env] next server port -> ${webPort} (WEB_PORT)`);
+  console.log(`[with-env] next server port -> ${webPort}`);
 }
 
 // Prefer launching the Next.js CLI through node directly so no shell is needed.

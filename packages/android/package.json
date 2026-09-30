@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "description": "JARVIS Android Mobile Controller Application",
   "scripts": {
-    "build": "gradlew.bat assembleDebug",
-    "apk": "gradlew.bat assembleDebug && node scripts/copy-apk.js",
-    "release": "gradlew.bat assembleRelease",
-    "clean": "gradlew.bat clean"
+    "build": "node -e \"process.platform === 'win32' ? require('child_process').execSync('gradlew.bat assembleDebug', {stdio:'inherit'}) : require('child_process').execSync('./gradlew assembleDebug', {stdio:'inherit'})\"",
+    "apk": "npm run build && node scripts/copy-apk.js",
+    "release": "node -e \"process.platform === 'win32' ? require('child_process').execSync('gradlew.bat assembleRelease', {stdio:'inherit'}) : require('child_process').execSync('./gradlew assembleRelease', {stdio:'inherit'})\"",
+    "clean": "node -e \"process.platform === 'win32' ? require('child_process').execSync('gradlew.bat clean', {stdio:'inherit'}) : require('child_process').execSync('./gradlew clean', {stdio:'inherit'})\""
   }
 }
+
