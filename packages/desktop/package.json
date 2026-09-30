@@ -1,0 +1,95 @@
+{
+  "name": "@jarvis/desktop",
+  "version": "1.0.0",
+  "description": "JARVIS Windows Host Shell - Local Control & AI Automation Companion",
+  "author": "JARVIS Engineering Team",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc && electron .",
+    "start": "electron .",
+    "package": "tsc && electron-builder --win portable --dir",
+    "installer": "tsc && electron-builder --win nsis",
+    "dist": "tsc && electron-builder --win nsis portable"
+  },
+  "dependencies": {
+    "@jarvis/shared": "*",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "electron": "30.0.9",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.5"
+  },
+  "build": {
+    "appId": "com.jarvis.host",
+    "productName": "JARVIS",
+    "electronVersion": "30.0.9",
+    "directories": {
+      "output": "dist/build"
+    },
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../server/dist",
+        "to": "server/dist",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../server/node_modules",
+        "to": "server/node_modules",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../server/package.json",
+        "to": "server/package.json"
+      },
+      {
+        "from": "../shared/dist",
+        "to": "shared/dist",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../shared/node_modules",
+        "to": "shared/node_modules",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../shared/package.json",
+        "to": "shared/package.json"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "JARVIS",
+      "artifactName": "JARVIS Setup.${ext}",
+      "uninstallDisplayName": "JARVIS Host PC"
+    },
+    "portable": {
+      "artifactName": "JARVIS.exe"
+    }
+  }
+}

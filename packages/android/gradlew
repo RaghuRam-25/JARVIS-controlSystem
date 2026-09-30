@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Gradle wrapper script for Unix
+DIRNAME=$(dirname "$0")
+CLASSPATH=$DIRNAME/gradle/wrapper/gradle-wrapper.jar
+if [ ! -f "$CLASSPATH" ]; then
+    curl -sLo "$CLASSPATH" https://raw.githubusercontent.com/gradle/gradle/master/gradle/wrapper/gradle-wrapper.jar
+fi
+exec java -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"

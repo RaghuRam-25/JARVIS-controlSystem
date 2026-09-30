@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>JARVIS Controller</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+    body { background-color: #070A13; color: #F0F6FC; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    .header { padding: 14px 16px; background: #0E1526; border-bottom: 1px solid rgba(0, 229, 255, 0.2); display: flex; align-items: center; justify-content: space-between; }
+    .header h1 { font-size: 14px; font-weight: bold; color: #00E5FF; }
+    .container { flex: 1; padding: 20px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 20px; }
+    .card { background: rgba(14, 21, 38, 0.8); border: 1px solid rgba(0, 229, 255, 0.2); border-radius: 20px; padding: 24px; width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 0 20px rgba(0, 229, 255, 0.15); }
+    .icon { width: 56px; height: 56px; border-radius: 16px; background: rgba(0, 229, 255, 0.1); border: 1px solid rgba(0, 229, 255, 0.3); display: flex; align-items: center; justify-content: center; margin: 0 auto; }
+    .input-box { width: 100%; padding: 12px; border-radius: 10px; background: #070A13; border: 1px solid #1E293B; color: #FFF; font-family: monospace; font-size: 13px; outline: none; }
+    .input-box:focus { border-color: #00E5FF; }
+    .btn { width: 100%; padding: 14px; border-radius: 12px; font-size: 13px; font-weight: bold; border: none; cursor: pointer; transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .btn-primary { background: #00E5FF; color: #070A13; box-shadow: 0 0 15px rgba(0, 229, 255, 0.3); }
+    .btn-secondary { background: #1E293B; color: #00E5FF; border: 1px solid rgba(0, 229, 255, 0.2); }
+    .subtitle { font-size: 12px; color: #8B949E; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>JARVIS Controller</h1>
+    <span style="font-size: 11px; color: #00E676;">● Ready</span>
+  </div>
+
+  <div class="container">
+    <div class="card">
+      <div class="icon">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#00E5FF" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+      </div>
+
+      <div>
+        <h2 style="font-size: 16px; font-weight: bold;">Connect to Host PC</h2>
+        <p class="subtitle" style="margin-top: 4px;">Enter your Windows PC's Wi-Fi IP address shown on the JARVIS host screen</p>
+      </div>
+
+      <input type="text" id="hostIp" class="input-box" placeholder="Host IP (e.g. 192.168.1.50)" />
+      
+      <button class="btn btn-primary" onclick="connectHost()">
+        Connect to JARVIS Host
+      </button>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script>
+    const CONFIG = window.JARVIS_CONFIG || { WEB_PORT: "3000", API_PORT: "4000", DEFAULT_HOST_URL: "" };
+    const savedIp = localStorage.getItem("jarvis_last_ip");
+    if (savedIp) {
+      document.getElementById("hostIp").value = savedIp;
+    }
+
+    function connectHost() {
+      const ip = document.getElementById("hostIp").value.trim();
+      if (!ip) {
+        alert("Please enter your Windows PC LAN IP address.");
+        return;
+      }
+      localStorage.setItem("jarvis_last_ip", ip);
+      const host = ip.includes(":") ? ip : ip + ":" + CONFIG.WEB_PORT;
+      window.location.href = (ip.includes("://") ? "" : "http://") + host + "/?mode=controller";
+    }
+  </script>
+</body>
+</html>

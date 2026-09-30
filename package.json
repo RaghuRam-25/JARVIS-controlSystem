@@ -1,0 +1,47 @@
+{
+  "name": "jarvis-v1-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JARVIS V1: Cross-Device Remote Control & AI Workspace Companion for Windows Host & Android Controller",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:shared": "npm run dev --workspace=@jarvis/shared",
+    "dev:server": "npm run dev --workspace=@jarvis/server",
+    "dev:web": "npm run dev --workspace=@jarvis/web",
+    "dev:desktop": "npm run dev --workspace=@jarvis/desktop",
+    "build": "npm run build --workspaces --if-present",
+    "build:shared": "npm run build --workspace=@jarvis/shared",
+    "build:server": "npm run build --workspace=@jarvis/server",
+    "build:web": "npm run build --workspace=@jarvis/web",
+    "build:desktop": "npm run build --workspace=@jarvis/desktop",
+    "android:dev": "npm run dev:web",
+    "android:build": "npm run build --workspace=@jarvis/android",
+    "android:apk": "npm run apk --workspace=@jarvis/android",
+    "desktop:dev": "npm run dev --workspace=@jarvis/desktop",
+    "desktop:build": "npm run build --workspace=@jarvis/desktop",
+    "desktop:package": "npm run package --workspace=@jarvis/desktop",
+    "desktop:installer": "npm run installer --workspace=@jarvis/desktop",
+    "start": "npm run start --workspace=@jarvis/server",
+    "test": "npm run test:security --workspace=@jarvis/server && npm run test:e2e --workspace=@jarvis/server",
+    "test:security": "npm run test:security --workspace=@jarvis/server",
+    "test:e2e": "npm run test:e2e --workspace=@jarvis/server",
+    "generate:icons": "powershell -ExecutionPolicy Bypass -File scripts/generate-icons.ps1"
+  },
+  "keywords": [
+    "jarvis",
+    "windows-host",
+    "android-controller",
+    "webrtc",
+    "electron",
+    "pwa",
+    "socketio"
+  ],
+  "author": "JARVIS Engineering Team",
+  "license": "MIT",
+  "devDependencies": {
+    "7zip-bin": "^5.2.0"
+  }
+}

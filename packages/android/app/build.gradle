@@ -1,0 +1,100 @@
+plugins {
+    id 'com.android.application'
+}
+
+/**
+ * Generates www/config.js for the controller bridge screen straight from the
+ * monorepo root .env, so the APK never hardcodes a port. The file is written
+ * into the build directory and never pollutes the source tree.
+ */
+def jarvisEnvFile = rootProject.file('../../.env')
+def jarvisGeneratedAssets = layout.buildDirectory.dir('generated/jarvisAssets')
+
+tasks.register('generateJarvisWebConfig') {
+    def outputDir = jarvisGeneratedAssets
+    inputs.file(jarvisEnvFile)
+    outputs.dir(outputDir)
+
+    doLast {
+        def values = [:]
+        if (jarvisEnvFile.exists()) {
+            jarvisEnvFile.eachLine('UTF-8') { rawLine ->
+                def line = rawLine.trim()
+                if (line && !line.startsWith('#')) {
+                    def idx = line.indexOf('=')
+                    if (idx > 0) {
+                        values[line.substring(0, idx).trim()] = line.substring(idx + 1).trim()
+                    }
+                }
+            }
+        }
+
+        def webPort = values['WEB_PORT'] ?: '3000'
+        def apiPort = values['PORT'] ?: '4000'
+        def defaultHost = values['ANDROID_DEFAULT_HOST_URL'] ?: ''
+
+        def wwwDir = new File(outputDir.get().asFile, 'www')
+        wwwDir.mkdirs()
+        new File(wwwDir, 'config.js').text = """window.JARVIS_CONFIG = {
+  WEB_PORT: "${webPort}",
+  API_PORT: "${apiPort}",
+  DEFAULT_HOST_URL: "${defaultHost}"
+};
+"""
+    }
+}
+
+android {
+    namespace 'com.jarvis.controller'
+    compileSdk 34
+
+    sourceSets {
+        main {
+            assets.srcDirs += jarvisGeneratedAssets
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.jarvis.controller"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            applicationIdSuffix ""
+            debuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    applicationVariants.all { variant ->
+        variant.outputs.all {
+            outputFileName = "JARVIS.apk"
+        }
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn 'generateJarvisWebConfig'
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.webkit:webkit:1.10.0'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+}
