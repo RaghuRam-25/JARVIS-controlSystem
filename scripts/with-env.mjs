@@ -68,12 +68,15 @@ function ensureNativeBinaries() {
   process.env.NODE_PATH = [existingNodePath, ...nodeModulesDirs].filter(Boolean).join(separator);
 
   const nativeFiles = new Map();
-  for (const nm of nodeModulesDirs) {
-    if (!fs.existsSync(nm)) continue;
+
+  function scanForNative(dir) {
+    if (!fs.existsSync(dir)) return;
     try {
-      for (const entry of fs.readdirSync(nm)) {
-        if (entry.startsWith("lightningcss-") || entry.startsWith("@tailwindcss")) {
-          const entryPath = path.join(nm, entry);
+      for (const entry of fs.readdirSync(dir)) {
+        const entryPath = path.join(dir, entry);
+        if (entry.startsWith("@")) {
+          scanForNative(entryPath);
+        } else if (entry.startsWith("lightningcss-") || entry.startsWith("oxide-") || entry.includes("oxide")) {
           if (fs.statSync(entryPath).isDirectory()) {
             for (const file of fs.readdirSync(entryPath)) {
               if (file.endsWith(".node")) {
@@ -87,15 +90,38 @@ function ensureNativeBinaries() {
   }
 
   for (const nm of nodeModulesDirs) {
+    scanForNative(nm);
+  }
+
+  for (const nm of nodeModulesDirs) {
+    // 1. lightningcss
     const lcssDir = path.join(nm, "lightningcss");
     if (fs.existsSync(lcssDir)) {
       for (const [filename, srcPath] of nativeFiles.entries()) {
-        const destPath = path.join(lcssDir, filename);
-        if (!fs.existsSync(destPath)) {
-          try {
-            fs.copyFileSync(srcPath, destPath);
-            console.log(`[with-env] Ensured native binary: ${filename}`);
-          } catch {}
+        if (filename.startsWith("lightningcss.")) {
+          const destPath = path.join(lcssDir, filename);
+          if (!fs.existsSync(destPath)) {
+            try {
+              fs.copyFileSync(srcPath, destPath);
+              console.log(`[with-env] Ensured native binary: ${filename} -> lightningcss`);
+            } catch {}
+          }
+        }
+      }
+    }
+
+    // 2. @tailwindcss/oxide
+    const oxideDir = path.join(nm, "@tailwindcss", "oxide");
+    if (fs.existsSync(oxideDir)) {
+      for (const [filename, srcPath] of nativeFiles.entries()) {
+        if (filename.startsWith("tailwindcss-oxide.")) {
+          const destPath = path.join(oxideDir, filename);
+          if (!fs.existsSync(destPath)) {
+            try {
+              fs.copyFileSync(srcPath, destPath);
+              console.log(`[with-env] Ensured native binary: ${filename} -> @tailwindcss/oxide`);
+            } catch {}
+          }
         }
       }
     }
