@@ -3,7 +3,7 @@
   "version": "1.0.1",
   "private": true,
   "scripts": {
-    "prebuild": "npm run build --workspace=@jarvis/shared",
+    "prebuild": "npm run build --workspace=@jarvis/shared && node ../../scripts/ensure-native.mjs",
     "dev": "node ../../scripts/with-env.mjs next dev",
     "build": "node ../../scripts/with-env.mjs next build",
     "start": "node ../../scripts/with-env.mjs next start",
