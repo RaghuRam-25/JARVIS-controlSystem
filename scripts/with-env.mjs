@@ -63,6 +63,10 @@ function ensureNativeBinaries() {
     path.join(root, "packages", "web", "node_modules"),
   ];
 
+  const existingNodePath = process.env.NODE_PATH || "";
+  const separator = process.platform === "win32" ? ";" : ":";
+  process.env.NODE_PATH = [existingNodePath, ...nodeModulesDirs].filter(Boolean).join(separator);
+
   const nativeFiles = new Map();
   for (const nm of nodeModulesDirs) {
     if (!fs.existsSync(nm)) continue;
