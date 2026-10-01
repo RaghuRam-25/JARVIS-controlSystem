@@ -104,21 +104,14 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
   const connectToHost = (ip: string, token: string) => {
     const serverUrl = resolveHostApiUrl(ip);
-    const socket = getSocket(serverUrl, { token });
+    const socket = getSocket(serverUrl, { token }, true);
     socketRef.current = socket;
 
-    // Approval delivers the signed token on this very socket; connectToHost is
-    // then re-invoked with that token so the session can be authenticated.
-    socket.on("pairing:approved", (decision: any) => {
-      if (!decision?.token) return;
-      setIsWaitingApproval(false);
-      setIsPaired(true);
-      setAuthToken(decision.token);
-      connectToHost(ip, decision.token);
-    });
+    // Immediately authenticate
+    socket.emit("auth:authenticate", { token });
 
-    socket.on("connect", () => {
-      console.log("Connected to JARVIS host:", ip);
+    const initConnection = () => {
+      console.log("Connected and authenticated with JARVIS host:", ip);
       setIsPaired(true);
       setIsWaitingApproval(false);
       localStorage.setItem("jarvis_controller_token", token);
@@ -136,6 +129,17 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
       // Spawn interactive terminal
       socket.emit("terminal:spawn", { shell: "powershell.exe", cols: 80, rows: 24 });
+    };
+
+    socket.off("auth:success");
+    socket.on("auth:success", () => {
+      initConnection();
+    });
+
+    socket.off("connect");
+    socket.on("connect", () => {
+      socket.emit("auth:authenticate", { token });
+      initConnection();
     });
 
     socket.on("terminal:ready", ({ sessionId }: { sessionId: string }) => {
@@ -155,11 +159,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         `[${new Date().toLocaleTimeString()}] ${result.message}`,
         ...prev.slice(0, 10),
       ]);
-    });
-
-    socket.on("auth:error", (err: any) => {
-      alert(`Authentication Error: ${err.message}`);
-      handleDisconnect();
     });
 
     socket.on("session:revoked", () => {

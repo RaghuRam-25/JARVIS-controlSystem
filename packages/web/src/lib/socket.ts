@@ -10,22 +10,32 @@ export interface SocketAuthOptions {
   hostCredential?: string;
 }
 
-export function getSocket(serverUrl?: string, options?: SocketAuthOptions): Socket {
-  if (socketInstance && socketInstance.connected) {
+export function getSocket(serverUrl?: string, options?: SocketAuthOptions, forceReconnect = false): Socket {
+  const url = serverUrl ? resolveHostApiUrl(serverUrl) : getSocketUrl();
+  const token = options?.token || "";
+  const hostCredential = options?.hostCredential || "";
+  const isHost = options?.isHost || false;
+
+  const currentAuth = (socketInstance?.auth || {}) as Record<string, unknown>;
+  const authMatches =
+    currentAuth.token === token &&
+    currentAuth.hostCredential === hostCredential &&
+    currentAuth.isHost === isHost;
+
+  if (socketInstance && socketInstance.connected && authMatches && !forceReconnect) {
     return socketInstance;
   }
 
-  const url = serverUrl ? resolveHostApiUrl(serverUrl) : getSocketUrl();
-
   if (socketInstance) {
     socketInstance.disconnect();
+    socketInstance = null;
   }
 
   socketInstance = io(url, {
     auth: {
-      isHost: options?.isHost || false,
-      token: options?.token || "",
-      hostCredential: options?.hostCredential || "",
+      isHost,
+      token,
+      hostCredential,
     },
     transports: ["polling", "websocket"],
     reconnection: true,

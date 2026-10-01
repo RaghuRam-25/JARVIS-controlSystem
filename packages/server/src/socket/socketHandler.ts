@@ -95,17 +95,32 @@ export function setupSocketHandlers(io: SocketIOServer) {
       socket.on("disconnect", () => {
         screenStreamManager.unregisterHost(socket.id);
       });
-    } else {
+    } else if (token) {
       // Authenticate controller
       session = await pairingManager.validateToken(token as string);
       if (!session) {
         socket.emit("auth:error", { message: "Unauthorized: Invalid or expired session token." });
-        // Allow unauthenticated clients only to listen for their pairing approval
       } else {
         socket.join(`session-${session.sessionId}`);
+        screenStreamManager.registerViewer(socket.id);
         socket.emit("auth:success", { session });
       }
+    } else {
+      // Unauthenticated client awaiting pairing approval
     }
+
+    // Runtime token authentication (allows immediate upgrade without reconnect)
+    socket.on("auth:authenticate", async (payload: { token?: string }) => {
+      if (!payload?.token) return;
+      session = await pairingManager.validateToken(payload.token);
+      if (session) {
+        socket.join(`session-${session.sessionId}`);
+        screenStreamManager.registerViewer(socket.id);
+        socket.emit("auth:success", { session });
+      } else {
+        socket.emit("auth:error", { message: "Unauthorized: Invalid or expired session token." });
+      }
+    });
 
     // --- Pairing Events ---
     socket.on("pairing:request", async (payload) => {
