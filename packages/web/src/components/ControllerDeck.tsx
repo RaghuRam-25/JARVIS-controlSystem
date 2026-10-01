@@ -130,6 +130,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       streamer.createViewerConnection((stream) => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
         }
       });
 
@@ -499,6 +500,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               ref={videoRef}
               autoPlay
               playsInline
+              muted
               className="w-full h-full object-contain cursor-crosshair"
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();

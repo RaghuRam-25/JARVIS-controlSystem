@@ -18,7 +18,8 @@ const corsOrigins = CONFIG.CORS_ORIGIN === "*"
 app.use(cors({
   origin: corsOrigins,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Jarvis-Token", "X-Jarvis-Host-Credential"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Jarvis-Token", "X-Jarvis-Host-Credential", "X-Socket-Id", "*"],
+  credentials: true,
   maxAge: 600,
 }));
 

@@ -182,6 +182,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = MouseMoveSchema.safeParse(data);
         if (parsed.success) {
           inputAutomation.handleMouseMove(parsed.data);
+          if (!isHost) {
+            io.to("host-room").emit("control:mouse_move", parsed.data);
+          }
         }
       });
     });
@@ -191,6 +194,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = MouseClickSchema.safeParse(data);
         if (parsed.success) {
           inputAutomation.handleMouseClick(parsed.data);
+          if (!isHost) {
+            io.to("host-room").emit("control:mouse_click", parsed.data);
+          }
         }
       });
     });
@@ -200,6 +206,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = MouseButtonActionSchema.safeParse(data);
         if (parsed.success) {
           inputAutomation.handleMouseButtonAction(parsed.data);
+          if (!isHost) {
+            io.to("host-room").emit("control:mouse_button", parsed.data);
+          }
         }
       });
     });
@@ -209,6 +218,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = MouseScrollSchema.safeParse(data);
         if (parsed.success) {
           inputAutomation.handleMouseScroll(parsed.data);
+          if (!isHost) {
+            io.to("host-room").emit("control:mouse_scroll", parsed.data);
+          }
         }
       });
     });
@@ -219,6 +231,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = KeyboardKeySchema.safeParse(data);
         if (parsed.success) {
           inputAutomation.handleKeyboardKey(parsed.data);
+          if (!isHost) {
+            io.to("host-room").emit("control:key", parsed.data);
+          }
         }
       });
     });
@@ -228,6 +243,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = KeyboardTypeSchema.safeParse(data);
         if (parsed.success) {
           inputAutomation.handleKeyboardType(parsed.data);
+          if (!isHost) {
+            io.to("host-room").emit("control:type", parsed.data);
+          }
         }
       });
     });
