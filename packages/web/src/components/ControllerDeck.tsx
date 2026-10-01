@@ -17,7 +17,12 @@ import {
   FolderOpen,
   Keyboard as KeyboardIcon,
   RefreshCw,
-  Move
+  Move,
+  Clipboard,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  AlertCircle
 } from "lucide-react";
 import { Html5Qrcode } from "html5-qrcode";
 import { getSocket, disconnectSocket } from "../lib/socket";
@@ -25,6 +30,9 @@ import { WebRTCStreamer } from "../lib/webrtc";
 import { API_ENDPOINTS, apiUrl, resolveHostApiUrl } from "../lib/env";
 
 type StreamStatus = "DISCONNECTED" | "CONNECTING" | "WAITING_FOR_SCREEN" | "STREAMING_LIVE" | "ERROR";
+type VoiceStatus = "IDLE" | "LISTENING" | "PROCESSING" | "SUCCESS" | "ERROR";
+
+const ZOOM_LEVELS = [75, 80, 90, 100, 110, 125, 150];
 
 export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void }) {
   // Connection & Auth State
@@ -40,21 +48,38 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
   // Stream & Interactive Screen State
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("DISCONNECTED");
-  const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
   const [keyboardText, setKeyboardText] = useState<string>("");
   const [isDragMode, setIsDragMode] = useState<boolean>(false);
+  const [zoomLevel, setZoomLevel] = useState<number>(100);
   const [touchIndicator, setTouchIndicator] = useState<{ x: number; y: number; visible: boolean; isRightClick?: boolean }>({
     x: 0,
     y: 0,
     visible: false,
   });
 
+  // Keyboard Modifier States
+  const [modifiers, setModifiers] = useState<{
+    ctrl: boolean;
+    alt: boolean;
+    shift: boolean;
+    win: boolean;
+    caps: boolean;
+  }>({
+    ctrl: false,
+    alt: false,
+    shift: false,
+    win: false,
+    caps: false,
+  });
+
   // Voice State
-  const [isListening, setIsListening] = useState<boolean>(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("IDLE");
   const [voiceLang, setVoiceLang] = useState<"en-US" | "bn-BD">("en-US");
   const [transcript, setTranscript] = useState<string>("");
+  const [voiceErrorMsg, setVoiceErrorMsg] = useState<string | null>(null);
   const [pendingVoiceIntent, setPendingVoiceIntent] = useState<any>(null);
   const [voiceLog, setVoiceLog] = useState<string[]>([]);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Refs
   const socketRef = useRef<any>(null);
@@ -83,6 +108,36 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     hostIpRef.current = hostIp;
   }, [sessionId, authToken, hostIp]);
 
+  // Load saved zoom level
+  useEffect(() => {
+    const savedZoom = localStorage.getItem("jarvis_zoom_level");
+    if (savedZoom) {
+      const parsed = parseInt(savedZoom, 10);
+      if (ZOOM_LEVELS.includes(parsed)) setZoomLevel(parsed);
+    }
+  }, []);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const handleZoom = (delta: number) => {
+    const currentIndex = ZOOM_LEVELS.indexOf(zoomLevel);
+    let newIndex = currentIndex !== -1 ? currentIndex + delta : 3;
+    newIndex = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, newIndex));
+    const newZoom = ZOOM_LEVELS[newIndex];
+    setZoomLevel(newZoom);
+    localStorage.setItem("jarvis_zoom_level", String(newZoom));
+    showToast(`Zoom: ${newZoom}%`);
+  };
+
+  const resetZoom = () => {
+    setZoomLevel(100);
+    localStorage.setItem("jarvis_zoom_level", "100");
+    showToast("Zoom: 100%");
+  };
+
   const stopQrScanner = useCallback(() => {
     if (html5QrCodeRef.current) {
       try {
@@ -94,7 +149,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   }, []);
 
   const handleDisconnect = useCallback(() => {
-    // 1. Notify server of session revocation if actively paired
     const currentSessionId = sessionIdRef.current || localStorage.getItem("jarvis_session_id");
     const currentToken = authTokenRef.current || localStorage.getItem("jarvis_controller_token");
     const currentHost = hostIpRef.current || localStorage.getItem("jarvis_host_ip");
@@ -118,7 +172,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       }
     }
 
-    // 2. Stop WebRTC streamer and clear video
     if (webrtcStreamerRef.current) {
       webrtcStreamerRef.current.stop();
       webrtcStreamerRef.current = null;
@@ -127,7 +180,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       videoRef.current.srcObject = null;
     }
 
-    // 3. Clean up socket completely
     if (socketRef.current) {
       try {
         socketRef.current.removeAllListeners();
@@ -137,15 +189,12 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }
     disconnectSocket();
 
-    // 4. Stop scanner if open
     stopQrScanner();
 
-    // 5. Clear stored tokens and session IDs
     localStorage.removeItem("jarvis_controller_token");
     localStorage.removeItem("jarvis_session_id");
     localStorage.removeItem("jarvis_host_ip");
 
-    // 6. Reset all React states
     setIsPaired(false);
     setAuthToken("");
     setSessionId("");
@@ -154,12 +203,11 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     setScannerActive(false);
     setManualNonce("");
     setManualChallengeId("");
-    setIsKeyboardOpen(false);
     setIsDragMode(false);
     setPendingVoiceIntent(null);
     setTranscript("");
+    setVoiceStatus("IDLE");
 
-    // 7. Reset all refs
     activeRequestIdRef.current = null;
     activeChallengeIdRef.current = null;
     isScanningRef.current = false;
@@ -179,7 +227,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     const chId = activeChallengeIdRef.current;
     const currentHost = hostIpRef.current;
 
-    // Send cancellation to server
     if (currentHost && (reqId || chId)) {
       const serverUrl = resolveHostApiUrl(currentHost);
       fetch(apiUrl(API_ENDPOINTS.pairingCancel, serverUrl), {
@@ -193,7 +240,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       }
     }
 
-    // Clean up temporary socket listeners
     if (socketRef.current) {
       try {
         socketRef.current.off("pairing:approved");
@@ -202,7 +248,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       } catch {}
     }
 
-    // Reset waiting state & locks
     activeRequestIdRef.current = null;
     activeChallengeIdRef.current = null;
     isScanningRef.current = false;
@@ -284,15 +329,31 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
     socket.off("voice:parsed");
     socket.on("voice:parsed", (intent: any) => {
-      setPendingVoiceIntent(intent);
+      console.log("[JARVIS VOICE] Command acknowledged", intent);
+      if (intent.requiresExplicitApproval) {
+        setPendingVoiceIntent(intent);
+        setVoiceStatus("IDLE");
+      } else {
+        // Auto-execute safe commands
+        console.log("[JARVIS VOICE] Sending command (auto-exec)");
+        socket.emit("voice:execute", {
+          intentId: intent.id,
+          approved: true,
+          rawTranscript: intent.rawTranscript,
+          language: intent.language,
+        });
+      }
     });
 
     socket.off("voice:result");
     socket.on("voice:result", (result: any) => {
+      console.log("[JARVIS VOICE] Execution completed", result);
+      setVoiceStatus(result.success ? "SUCCESS" : "ERROR");
       setVoiceLog((prev) => [
         `[${new Date().toLocaleTimeString()}] ${result.message}`,
         ...prev.slice(0, 10),
       ]);
+      setTimeout(() => setVoiceStatus("IDLE"), 2500);
     });
 
     socket.off("session:revoked");
@@ -301,7 +362,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       handleDisconnect();
     });
 
-    // Windows Host Agent connection state
     socket.off("host:offline");
     socket.on("host:offline", ({ event, message }: { event: string; message: string }) => {
       console.warn(`[JARVIS] HOST_OFFLINE for event "${event}": ${message}`);
@@ -322,7 +382,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       }
     });
   }, [initWebRTCViewer, handleDisconnect]);
-
 
   // Restore saved session from localStorage
   useEffect(() => {
@@ -347,21 +406,42 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         recog.interimResults = true;
         recog.lang = voiceLang;
 
+        recog.onstart = () => {
+          console.log("[JARVIS VOICE] Listening started");
+          setVoiceStatus("LISTENING");
+          setVoiceErrorMsg(null);
+        };
+
         recog.onresult = (event: any) => {
           const current = event.resultIndex;
           const text = event.results[current][0].transcript;
+          console.log("[JARVIS VOICE] Transcript: " + text);
           setTranscript(text);
         };
 
         recog.onend = () => {
-          setIsListening(false);
           if (transcript) {
+            console.log("[JARVIS VOICE] Final command: " + transcript);
+            setVoiceStatus("PROCESSING");
             handleVoiceParse(transcript);
+          } else {
+            setVoiceStatus("IDLE");
           }
         };
 
-        recog.onerror = () => {
-          setIsListening(false);
+        recog.onerror = (event: any) => {
+          console.warn("[JARVIS VOICE] Recognition error:", event.error);
+          setVoiceStatus("ERROR");
+          if (event.error === "not-allowed") {
+            setVoiceErrorMsg("Microphone permission denied. Please allow microphone access in your browser.");
+          } else if (event.error === "no-speech") {
+            setVoiceErrorMsg("No speech detected. Please speak clearly.");
+          } else {
+            setVoiceErrorMsg(`Voice recognition error: ${event.error}`);
+          }
+          setTimeout(() => {
+            if (voiceStatus === "ERROR") setVoiceStatus("IDLE");
+          }, 3500);
         };
 
         recognitionRef.current = recog;
@@ -369,7 +449,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }
   }, [voiceLang, transcript]);
 
-  // QR Scanner Handler with Double-Submission Protection
+  // QR Scanner Handler
   const startQrScanner = () => {
     setScannerActive(true);
     isScanningRef.current = false;
@@ -381,7 +461,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         { fps: 10, qrbox: { width: 250, height: 250 } },
         async (decodedText) => {
           const now = Date.now();
-          // Prevent multiple concurrent submissions from rapid video frames
           if (isScanningRef.current) return;
 
           try {
@@ -391,7 +470,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               return;
             }
 
-            // Reject duplicate scan of the same challenge within 3 seconds
             if (
               lastScannedChallengeRef.current &&
               lastScannedChallengeRef.current.challengeId === payload.challengeId &&
@@ -437,7 +515,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       const socket = getSocket(serverUrl, undefined, true);
       socketRef.current = socket;
 
-      // Listen for approval on this socket
       socket.off("pairing:approved");
       socket.on("pairing:approved", (decision: any) => {
         if (!decision?.token) return;
@@ -474,7 +551,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         socketId: socket.id || socketId || undefined,
       };
 
-      // Submit pairing request via REST (single dispatch, carrying socketId for approval delivery)
       const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, serverUrl), {
         method: "POST",
         headers: {
@@ -571,7 +647,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
     setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: false });
 
-    // Long press timer (500ms for Right Click)
     if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = setTimeout(() => {
       longPressFiredRef.current = true;
@@ -703,22 +778,86 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   };
 
   // Keyboard Helpers
-  const sendKey = (key: string, modifiers = { ctrl: false, alt: false, shift: false, meta: false }) => {
-    socketRef.current?.emit("control:key", { key, action: "press", modifiers });
+  const sendKey = (key: string) => {
+    if (navigator.vibrate) navigator.vibrate(10);
+
+    // Toggle modifiers
+    if (key === "Ctrl") {
+      setModifiers((prev) => ({ ...prev, ctrl: !prev.ctrl }));
+      return;
+    }
+    if (key === "Alt") {
+      setModifiers((prev) => ({ ...prev, alt: !prev.alt }));
+      return;
+    }
+    if (key === "Shift") {
+      setModifiers((prev) => ({ ...prev, shift: !prev.shift }));
+      return;
+    }
+    if (key === "Win") {
+      setModifiers((prev) => ({ ...prev, win: !prev.win }));
+      return;
+    }
+    if (key === "Caps") {
+      setModifiers((prev) => ({ ...prev, caps: !prev.caps }));
+      return;
+    }
+
+    const effectiveModifiers = {
+      ctrl: modifiers.ctrl,
+      alt: modifiers.alt,
+      shift: modifiers.shift,
+      meta: modifiers.win,
+    };
+
+    socketRef.current?.emit("control:key", {
+      key,
+      action: "press",
+      modifiers: effectiveModifiers,
+    });
+
+    // Auto-release non-caps modifiers after keypress
+    if (modifiers.shift || modifiers.ctrl || modifiers.alt || modifiers.win) {
+      setModifiers((prev) => ({ ...prev, shift: false, ctrl: false, alt: false, win: false }));
+    }
   };
 
   const sendTypedText = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!keyboardText) return;
     socketRef.current?.emit("control:type", { text: keyboardText });
+    showToast(`Sent: "${keyboardText}"`);
     setKeyboardText("");
+  };
+
+  const handlePaste = async () => {
+    try {
+      let text = "";
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        text = await navigator.clipboard.readText();
+      }
+      if (!text) {
+        text = prompt("Paste text to send to Windows:") || "";
+      }
+      if (text) {
+        socketRef.current?.emit("control:type", { text });
+        showToast(`Pasted ${text.length} characters`);
+      }
+    } catch {
+      const text = prompt("Paste text to send to Windows:");
+      if (text) {
+        socketRef.current?.emit("control:type", { text });
+        showToast(`Pasted ${text.length} characters`);
+      }
+    }
   };
 
   // Voice Helpers
   const toggleVoice = () => {
-    if (isListening) {
+    setVoiceErrorMsg(null);
+    if (voiceStatus === "LISTENING") {
       recognitionRef.current?.stop();
-      setIsListening(false);
+      setVoiceStatus("IDLE");
     } else {
       setTranscript("");
       setPendingVoiceIntent(null);
@@ -726,7 +865,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         if (recognitionRef.current) {
           recognitionRef.current.lang = voiceLang;
           recognitionRef.current.start();
-          setIsListening(true);
         } else {
           const text = prompt("Enter speech command (e.g. 'open vs code' or 'ক্রোম খোলো'):");
           if (text) {
@@ -734,7 +872,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
             handleVoiceParse(text);
           }
         }
-      } catch {
+      } catch (err: any) {
         const text = prompt("Enter voice command:");
         if (text) handleVoiceParse(text);
       }
@@ -742,12 +880,14 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   };
 
   const handleVoiceParse = (text: string) => {
+    console.log("[JARVIS VOICE] Sending voice:parse for transcript: " + text);
     socketRef.current?.emit("voice:parse", { text, language: voiceLang === "bn-BD" ? "bn" : "en" });
   };
 
   const executeVoiceIntent = (approved: boolean) => {
     if (!pendingVoiceIntent) return;
     if (approved) {
+      console.log("[JARVIS VOICE] Sending approved voice:execute command");
       socketRef.current?.emit("voice:execute", {
         intentId: pendingVoiceIntent.id,
         approved: true,
@@ -763,7 +903,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   // ==========================================
   if (!isPaired) {
     return (
-      <div className="min-h-screen bg-[#070a13] text-[#f0f6fc] p-4 flex flex-col items-center justify-center">
+      <div className="h-[100dvh] max-h-[100dvh] w-full bg-[#070a13] text-[#f0f6fc] p-4 flex flex-col items-center justify-center overflow-y-auto">
         <div className="w-full max-w-md glass-panel rounded-2xl p-6 flex flex-col items-center text-center gap-6">
           <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center glow-cyan">
             <Camera className="w-6 h-6 text-cyan-400" />
@@ -850,31 +990,65 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     );
   }
 
+  // Determine uppercase state
+  const isShifted = modifiers.shift || modifiers.caps;
+
   // ==========================================
   // AUTHENTICATED CONTROLLER WORKSPACE
   // ==========================================
   return (
-    <div className="min-h-screen bg-[#070a13] text-[#f0f6fc] flex flex-col select-none overflow-hidden touch-none">
-      {/* Top Header */}
-      <header className="px-3 py-2 bg-[#0E1526] border-b border-cyan-500/20 flex items-center justify-between z-20">
+    <div className="h-[100dvh] max-h-[100dvh] w-full bg-[#070a13] text-[#f0f6fc] flex flex-col select-none overflow-hidden touch-none fixed inset-0">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 rounded-full bg-cyan-950/90 text-cyan-300 text-xs border border-cyan-500/50 shadow-lg backdrop-blur-md animate-fade-in pointer-events-none">
+          {toastMessage}
+        </div>
+      )}
+
+      {/* Top Header Bar */}
+      <header className="h-11 flex-shrink-0 px-3 bg-[#0e1526] border-b border-cyan-500/20 flex items-center justify-between z-30">
         <div className="flex items-center gap-2">
           <span className={`w-2.5 h-2.5 rounded-full ${streamStatus === "STREAMING_LIVE" ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
           <div>
             <h1 className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
-              <span>JARVIS Live Desktop</span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-500/30">
+              <span>JARVIS</span>
+              <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-500/30">
                 {streamStatus === "STREAMING_LIVE" ? "LIVE" : streamStatus.replace(/_/g, " ")}
               </span>
             </h1>
-            <p className="text-[9px] text-slate-400 font-mono truncate max-w-[140px]">{hostIp || "Host Connected"}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-1.5">
-          {/* Quick Drag / Select Mode Toggle */}
+          {/* Zoom Controls */}
+          <div className="flex items-center bg-slate-900 rounded-lg border border-slate-700/80 p-0.5">
+            <button
+              onClick={() => handleZoom(-1)}
+              className="p-1 rounded text-slate-400 hover:text-cyan-300 active:bg-slate-800"
+              title="Zoom Out"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={resetZoom}
+              className="px-1.5 text-[10px] font-mono text-cyan-300 font-semibold"
+              title="Reset Zoom to 100%"
+            >
+              {zoomLevel}%
+            </button>
+            <button
+              onClick={() => handleZoom(1)}
+              className="p-1 rounded text-slate-400 hover:text-cyan-300 active:bg-slate-800"
+              title="Zoom In"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Drag Mode Toggle */}
           <button
             onClick={() => setIsDragMode((prev) => !prev)}
-            className={`px-2 py-1 rounded-lg text-[11px] font-semibold border transition-all flex items-center gap-1 ${
+            className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-all flex items-center gap-1 ${
               isDragMode 
                 ? "bg-amber-500/20 text-amber-300 border-amber-500/50 glow-amber" 
                 : "bg-slate-800 text-slate-300 border-slate-700"
@@ -882,20 +1056,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
             title="Toggle Drag/Select Mode"
           >
             <Move className="w-3 h-3" />
-            <span>{isDragMode ? "Drag ON" : "Tap"}</span>
-          </button>
-
-          {/* Virtual Keyboard Toggle */}
-          <button
-            onClick={() => setIsKeyboardOpen((prev) => !prev)}
-            className={`p-1.5 rounded-lg border text-xs transition-colors ${
-              isKeyboardOpen 
-                ? "bg-cyan-500 text-slate-950 border-cyan-400" 
-                : "bg-slate-800 text-cyan-300 border-cyan-500/30 hover:bg-slate-700"
-            }`}
-            title="Toggle Virtual Keyboard"
-          >
-            <KeyboardIcon className="w-4 h-4" />
+            <span>{isDragMode ? "Drag" : "Tap"}</span>
           </button>
 
           {/* Reconnect WebRTC Stream */}
@@ -906,13 +1067,13 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
             className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700 text-xs"
             title="Refresh Stream"
           >
-            <RefreshCw className="w-4 h-4" />
+            <RefreshCw className="w-3.5 h-3.5" />
           </button>
 
           {/* Bengali / English Language Toggle */}
           <button
             onClick={() => setVoiceLang((prev) => (prev === "en-US" ? "bn-BD" : "en-US"))}
-            className="px-2 py-1 rounded-lg bg-slate-800 text-[11px] font-medium text-cyan-300 border border-cyan-500/20 flex items-center gap-1"
+            className="px-2 py-1 rounded-lg bg-slate-800 text-[10px] font-medium text-cyan-300 border border-cyan-500/20 flex items-center gap-0.5"
           >
             <Globe className="w-3 h-3" />
             <span>{voiceLang === "en-US" ? "EN" : "বাং"}</span>
@@ -924,143 +1085,356 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
             className="p-1.5 rounded-lg bg-red-950/60 text-red-400 hover:bg-red-900 border border-red-500/30 text-xs"
             title="Disconnect"
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut className="w-3.5 h-3.5" />
           </button>
         </div>
       </header>
 
-      {/* Main Surface Area */}
-      <main className="flex-1 flex flex-col overflow-hidden relative bg-black">
-        {/* TAB 1: DOMINANT TOUCH-TO-CONTROL LIVE SCREEN */}
+      {/* Main Workspace Area (No Document Scrolling) */}
+      <main className="flex-1 flex flex-col overflow-hidden relative min-h-0 bg-[#070a13]">
+        {/* ======================================================== */}
+        {/* TAB 1: REMOTE SCREEN AT TOP + KEYBOARD/CONTROLS BELOW     */}
+        {/* ======================================================== */}
         {activeTab === "screen" && (
-          <div className="flex-1 w-full h-full bg-black flex flex-col items-center justify-center relative overflow-hidden">
-            {/* Visual Touch Ripple */}
-            {touchIndicator.visible && (
-              <div
-                className={`absolute w-8 h-8 -ml-4 -mt-4 rounded-full pointer-events-none z-50 animate-ping ${
-                  touchIndicator.isRightClick ? "bg-amber-400 border-2 border-amber-200" : "bg-cyan-400 border-2 border-white"
-                }`}
-                style={{ left: touchIndicator.x, top: touchIndicator.y }}
-              />
-            )}
+          <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+            {/* Top Section: Remote Laptop Screen */}
+            <div 
+              className="w-full bg-black relative flex items-center justify-center overflow-hidden flex-shrink-0"
+              style={{
+                height: "40vh",
+                maxHeight: "42vh",
+              }}
+            >
+              {/* Visual Touch Ripple */}
+              {touchIndicator.visible && (
+                <div
+                  className={`absolute w-8 h-8 -ml-4 -mt-4 rounded-full pointer-events-none z-50 animate-ping ${
+                    touchIndicator.isRightClick ? "bg-amber-400 border-2 border-amber-200" : "bg-cyan-400 border-2 border-white"
+                  }`}
+                  style={{ left: touchIndicator.x, top: touchIndicator.y }}
+                />
+              )}
 
-            {/* Waiting for stream placeholder if not live */}
-            {streamStatus !== "STREAMING_LIVE" && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center z-10 bg-[#070a13]/90">
-                <div className="w-10 h-10 rounded-full border-3 border-cyan-500 border-t-transparent animate-spin" />
-                <p className="text-sm font-semibold text-cyan-300">
-                  {streamStatus === "WAITING_FOR_SCREEN" ? "Waiting for Windows Screen Capture..." : "Connecting to Stream..."}
-                </p>
-                <p className="text-xs text-slate-400 max-w-xs">
-                  Make sure screen streaming is enabled on your Windows Host PC dashboard.
-                </p>
-                <button
-                  onClick={() => {
-                    if (socketRef.current) initWebRTCViewer(socketRef.current);
-                  }}
-                  className="mt-2 px-3 py-1.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-semibold"
-                >
-                  Retry Stream Connection
-                </button>
-              </div>
-            )}
-
-            {/* Live Interactive Video Surface */}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onTouchStart={handleTouchStart}
-              onTouchMove={handleTouchMove}
-              onTouchEnd={handleTouchEnd}
-              className="w-full h-full object-contain cursor-crosshair touch-none select-none"
-            />
-
-            {/* Floating Top/Bottom On-Screen Keyboard Drawer */}
-            {isKeyboardOpen && (
-              <div className="absolute bottom-12 left-2 right-2 p-2.5 rounded-2xl bg-[#0e1526]/95 border border-cyan-500/40 backdrop-blur-md z-30 shadow-2xl flex flex-col gap-2 animate-in slide-in-from-bottom-5">
-                <div className="flex items-center justify-between pb-1 border-b border-slate-800">
-                  <span className="text-[11px] font-bold text-cyan-400 flex items-center gap-1.5">
-                    <KeyboardIcon className="w-3.5 h-3.5" />
-                    <span>Windows Remote Keyboard</span>
-                  </span>
+              {/* Stream Placeholder / Waiting state */}
+              {streamStatus !== "STREAMING_LIVE" && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center z-10 bg-[#070a13]/90">
+                  <div className="w-8 h-8 rounded-full border-3 border-cyan-500 border-t-transparent animate-spin" />
+                  <p className="text-xs font-semibold text-cyan-300">
+                    {streamStatus === "WAITING_FOR_SCREEN" ? "Waiting for Screen Stream from Host PC..." : "Connecting..."}
+                  </p>
                   <button
-                    onClick={() => setIsKeyboardOpen(false)}
-                    className="p-1 rounded text-slate-400 hover:text-white"
+                    onClick={() => {
+                      if (socketRef.current) initWebRTCViewer(socketRef.current);
+                    }}
+                    className="mt-1 px-2.5 py-1 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[11px] font-semibold"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    Retry Stream
                   </button>
                 </div>
+              )}
 
-                {/* Modifier & Special Action Keys */}
-                <div className="flex flex-wrap gap-1">
+              {/* Live Interactive Video Surface */}
+              <div 
+                className="w-full h-full flex items-center justify-center transition-transform duration-100"
+                style={{
+                  transform: zoomLevel !== 100 ? `scale(${zoomLevel / 100})` : undefined,
+                  transformOrigin: "center center",
+                }}
+              >
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  onTouchStart={handleTouchStart}
+                  onTouchMove={handleTouchMove}
+                  onTouchEnd={handleTouchEnd}
+                  className="w-full h-full object-contain cursor-crosshair touch-none select-none"
+                />
+              </div>
+            </div>
+
+            {/* Bottom Section: Typing Bar + Full Realistic Keyboard Area (BELOW SCREEN) */}
+            <div className="flex-1 flex flex-col bg-[#070a13] p-1.5 gap-1.5 overflow-y-auto min-h-0 border-t border-slate-800/80">
+              {/* Direct Text Typing & Mobile Paste Box */}
+              <div className="flex gap-1.5 flex-shrink-0">
+                <form onSubmit={sendTypedText} className="flex-1 flex gap-1">
+                  <input
+                    type="text"
+                    value={keyboardText}
+                    onChange={(e) => setKeyboardText(e.target.value)}
+                    onPaste={(e) => {
+                      const text = e.clipboardData.getData("text");
+                      if (text) {
+                        socketRef.current?.emit("control:type", { text });
+                        showToast(`Pasted ${text.length} characters`);
+                      }
+                    }}
+                    placeholder="Type words or paste text to send to Windows..."
+                    className="flex-1 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-400"
+                  />
+                  <button
+                    type="submit"
+                    className="px-2.5 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center gap-1 glow-cyan"
+                  >
+                    <Send className="w-3 h-3" />
+                    <span>Send</span>
+                  </button>
+                </form>
+
+                {/* Mobile Paste Button */}
+                <button
+                  type="button"
+                  onClick={handlePaste}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold text-xs border border-cyan-500/30 flex items-center gap-1"
+                  title="Paste Clipboard Text"
+                >
+                  <Clipboard className="w-3.5 h-3.5" />
+                  <span>Paste</span>
+                </button>
+              </div>
+
+              {/* Realistic Full Virtual Keyboard (Grid of Keys) */}
+              <div className="flex-1 flex flex-col gap-1 select-none overflow-y-auto min-h-0">
+                {/* Row 1: Esc, Function Keys, Delete */}
+                <div className="flex gap-0.5 w-full">
                   {[
-                    { label: "Ctrl", key: "Ctrl" },
-                    { label: "Alt", key: "Alt" },
-                    { label: "Shift", key: "Shift" },
                     { label: "Esc", key: "Escape" },
-                    { label: "Tab", key: "Tab" },
-                    { label: "Win", key: "Win" },
-                    { label: "Enter", key: "Enter" },
-                    { label: "⌫", key: "Backspace" },
-                    { label: "Space", key: "Space" },
-                    { label: "↑", key: "ArrowUp" },
-                    { label: "↓", key: "ArrowDown" },
-                    { label: "←", key: "ArrowLeft" },
-                    { label: "→", key: "ArrowRight" },
+                    { label: "F1", key: "F1" },
+                    { label: "F2", key: "F2" },
+                    { label: "F3", key: "F3" },
+                    { label: "F4", key: "F4" },
+                    { label: "F5", key: "F5" },
+                    { label: "F6", key: "F6" },
+                    { label: "F7", key: "F7" },
+                    { label: "F8", key: "F8" },
+                    { label: "F9", key: "F9" },
+                    { label: "F10", key: "F10" },
+                    { label: "F11", key: "F11" },
+                    { label: "F12", key: "F12" },
+                    { label: "Del", key: "Delete" },
                   ].map((k) => (
                     <button
                       key={k.label}
                       onClick={() => sendKey(k.key)}
-                      className="px-2 py-1 rounded bg-slate-800 active:bg-cyan-500 active:text-slate-950 hover:bg-slate-700 text-[11px] font-mono font-semibold text-slate-200 border border-slate-700 transition-colors"
+                      className="flex-1 py-1 text-[9px] font-mono font-semibold rounded key-cap text-slate-300"
                     >
                       {k.label}
                     </button>
                   ))}
                 </div>
 
-                {/* Direct Text Input & Send */}
-                <form onSubmit={sendTypedText} className="flex gap-1.5">
-                  <input
-                    type="text"
-                    value={keyboardText}
-                    onChange={(e) => setKeyboardText(e.target.value)}
-                    placeholder="Type words/URLs to send to Windows..."
-                    className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-cyan-400"
-                  />
-                  <button
-                    type="submit"
-                    className="px-3 py-1.5 rounded-lg bg-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1"
-                  >
-                    <Send className="w-3 h-3" />
-                    <span>Send</span>
-                  </button>
-                </form>
-              </div>
-            )}
+                {/* Row 2: Numbers & Symbols Row */}
+                <div className="flex gap-0.5 w-full">
+                  {[
+                    { normal: "`", shifted: "~", key: isShifted ? "~" : "`" },
+                    { normal: "1", shifted: "!", key: isShifted ? "!" : "1" },
+                    { normal: "2", shifted: "@", key: isShifted ? "@" : "2" },
+                    { normal: "3", shifted: "#", key: isShifted ? "#" : "3" },
+                    { normal: "4", shifted: "$", key: isShifted ? "$" : "4" },
+                    { normal: "5", shifted: "%", key: isShifted ? "%" : "5" },
+                    { normal: "6", shifted: "^", key: isShifted ? "^" : "6" },
+                    { normal: "7", shifted: "&", key: isShifted ? "&" : "7" },
+                    { normal: "8", shifted: "*", key: isShifted ? "*" : "8" },
+                    { normal: "9", shifted: "(", key: isShifted ? "(" : "9" },
+                    { normal: "0", shifted: ")", key: isShifted ? ")" : "0" },
+                    { normal: "-", shifted: "_", key: isShifted ? "_" : "-" },
+                    { normal: "=", shifted: "+", key: isShifted ? "+" : "=" },
+                    { normal: "⌫", shifted: "⌫", key: "Backspace", width: "w-10" },
+                  ].map((k) => (
+                    <button
+                      key={k.normal}
+                      onClick={() => sendKey(k.key)}
+                      className={`${k.width || "flex-1"} py-1.5 text-[11px] font-mono font-semibold rounded key-cap text-slate-200`}
+                    >
+                      {k.key}
+                    </button>
+                  ))}
+                </div>
 
-            {/* Gesture Guide Overlay */}
-            <div className="absolute bottom-2 left-3 right-3 flex items-center justify-between pointer-events-none opacity-60">
-              <span className="px-2 py-0.5 rounded-full bg-black/80 backdrop-blur-sm text-[9px] font-mono text-cyan-400 border border-cyan-500/30">
-                Tap: Click • Hold: Right Click • 2-Finger: Scroll
-              </span>
+                {/* Row 3: Tab + QWERTY */}
+                <div className="flex gap-0.5 w-full">
+                  <button
+                    onClick={() => sendKey("Tab")}
+                    className="w-9 py-1.5 text-[10px] font-mono font-semibold rounded key-cap key-cap-modifier text-slate-400"
+                  >
+                    Tab
+                  </button>
+                  {["q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]", "\\"].map((char) => {
+                    const displayChar = isShifted ? char.toUpperCase() : char;
+                    return (
+                      <button
+                        key={char}
+                        onClick={() => sendKey(displayChar)}
+                        className="flex-1 py-1.5 text-[11px] font-mono font-semibold rounded key-cap text-slate-100"
+                      >
+                        {displayChar}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Row 4: Caps + Home Row + Enter */}
+                <div className="flex gap-0.5 w-full">
+                  <button
+                    onClick={() => sendKey("Caps")}
+                    className={`w-10 py-1.5 text-[10px] font-mono font-semibold rounded key-cap ${modifiers.caps ? "key-cap-active" : "key-cap-modifier text-slate-400"}`}
+                  >
+                    Caps
+                  </button>
+                  {["a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'"].map((char) => {
+                    const displayChar = isShifted ? char.toUpperCase() : char;
+                    return (
+                      <button
+                        key={char}
+                        onClick={() => sendKey(displayChar)}
+                        className="flex-1 py-1.5 text-[11px] font-mono font-semibold rounded key-cap text-slate-100"
+                      >
+                        {displayChar}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => sendKey("Enter")}
+                    className="w-11 py-1.5 text-[10px] font-mono font-semibold rounded key-cap bg-cyan-900/60 text-cyan-300 border-cyan-500/40"
+                  >
+                    Enter
+                  </button>
+                </div>
+
+                {/* Row 5: Shift + Bottom Row + Up Arrow + Shift */}
+                <div className="flex gap-0.5 w-full">
+                  <button
+                    onClick={() => sendKey("Shift")}
+                    className={`w-11 py-1.5 text-[10px] font-mono font-semibold rounded key-cap ${modifiers.shift ? "key-cap-active" : "key-cap-modifier text-slate-400"}`}
+                  >
+                    Shift
+                  </button>
+                  {["z", "x", "c", "v", "b", "n", "m", ",", ".", "/"].map((char) => {
+                    const displayChar = isShifted ? char.toUpperCase() : char;
+                    return (
+                      <button
+                        key={char}
+                        onClick={() => sendKey(displayChar)}
+                        className="flex-1 py-1.5 text-[11px] font-mono font-semibold rounded key-cap text-slate-100"
+                      >
+                        {displayChar}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => sendKey("ArrowUp")}
+                    className="w-8 py-1.5 text-[11px] font-mono font-bold rounded key-cap text-cyan-300"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    onClick={() => sendKey("Shift")}
+                    className={`w-9 py-1.5 text-[10px] font-mono font-semibold rounded key-cap ${modifiers.shift ? "key-cap-active" : "key-cap-modifier text-slate-400"}`}
+                  >
+                    Shift
+                  </button>
+                </div>
+
+                {/* Row 6: Modifiers, Spacebar & Navigation */}
+                <div className="flex gap-0.5 w-full">
+                  <button
+                    onClick={() => sendKey("Ctrl")}
+                    className={`w-9 py-1.5 text-[10px] font-mono font-semibold rounded key-cap ${modifiers.ctrl ? "key-cap-active" : "key-cap-modifier text-slate-400"}`}
+                  >
+                    Ctrl
+                  </button>
+                  <button
+                    onClick={() => sendKey("Win")}
+                    className={`w-8 py-1.5 text-[10px] font-mono font-semibold rounded key-cap ${modifiers.win ? "key-cap-active" : "key-cap-modifier text-slate-400"}`}
+                  >
+                    Win
+                  </button>
+                  <button
+                    onClick={() => sendKey("Alt")}
+                    className={`w-8 py-1.5 text-[10px] font-mono font-semibold rounded key-cap ${modifiers.alt ? "key-cap-active" : "key-cap-modifier text-slate-400"}`}
+                  >
+                    Alt
+                  </button>
+                  <button
+                    onClick={() => sendKey("Space")}
+                    className="flex-1 py-1.5 text-[10px] font-mono font-semibold rounded key-cap text-slate-300"
+                  >
+                    Space
+                  </button>
+                  <button
+                    onClick={() => sendKey("ArrowLeft")}
+                    className="w-8 py-1.5 text-[11px] font-mono font-bold rounded key-cap text-cyan-300"
+                  >
+                    ←
+                  </button>
+                  <button
+                    onClick={() => sendKey("ArrowDown")}
+                    className="w-8 py-1.5 text-[11px] font-mono font-bold rounded key-cap text-cyan-300"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    onClick={() => sendKey("ArrowRight")}
+                    className="w-8 py-1.5 text-[11px] font-mono font-bold rounded key-cap text-cyan-300"
+                  >
+                    →
+                  </button>
+                  <button
+                    onClick={() => sendKey("Home")}
+                    className="w-9 py-1.5 text-[9px] font-mono font-semibold rounded key-cap text-slate-400"
+                  >
+                    Home
+                  </button>
+                  <button
+                    onClick={() => sendKey("End")}
+                    className="w-9 py-1.5 text-[9px] font-mono font-semibold rounded key-cap text-slate-400"
+                  >
+                    End
+                  </button>
+                  <button
+                    onClick={() => sendKey("PageUp")}
+                    className="w-9 py-1.5 text-[9px] font-mono font-semibold rounded key-cap text-slate-400"
+                  >
+                    PgUp
+                  </button>
+                  <button
+                    onClick={() => sendKey("PageDown")}
+                    className="w-9 py-1.5 text-[9px] font-mono font-semibold rounded key-cap text-slate-400"
+                  >
+                    PgDn
+                  </button>
+                </div>
+              </div>
+
+              {/* Gesture Hint Bar */}
+              <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 px-1 pt-0.5 border-t border-slate-800 flex-shrink-0">
+                <span>Tap: Click • Hold: Right Click • 2-Finger: Scroll</span>
+                <span className="text-cyan-400">{isDragMode ? "● DRAG ON" : "○ TAP MODE"}</span>
+              </div>
             </div>
           </div>
         )}
 
-        {/* TAB 2: VOICE AUTOMATION & INTENTS */}
+        {/* ======================================================== */}
+        {/* TAB 2: VOICE AUTOMATION & SPEECH ENGINE                   */}
+        {/* ======================================================== */}
         {activeTab === "voice" && (
           <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto bg-[#070A13]">
+            {/* Main Microphone Action Card */}
             <div className="glass-panel rounded-2xl p-6 flex flex-col items-center text-center gap-4">
               <button
                 onClick={toggleVoice}
                 className={`w-20 h-20 rounded-full flex items-center justify-center transition-all ${
-                  isListening 
-                    ? "bg-red-500 glow-red animate-pulse text-white scale-110" 
+                  voiceStatus === "LISTENING"
+                    ? "bg-red-500 glow-red animate-pulse text-white scale-110"
+                    : voiceStatus === "PROCESSING"
+                    ? "bg-amber-500 glow-amber text-slate-950 animate-spin scale-105"
+                    : voiceStatus === "SUCCESS"
+                    ? "bg-emerald-500 glow-emerald text-white"
                     : "bg-cyan-500/20 text-cyan-400 border-2 border-cyan-500/40 glow-cyan hover:scale-105"
                 }`}
               >
@@ -1068,14 +1442,37 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               </button>
 
               <div className="space-y-1">
-                <p className="text-sm font-bold text-slate-100">
-                  {isListening ? "Listening... (Speak Now)" : "Tap Microphone to Speak"}
+                <p className="text-sm font-bold text-slate-100 flex items-center justify-center gap-1.5">
+                  <span>
+                    {voiceStatus === "LISTENING"
+                      ? "Listening... (Speak Now)"
+                      : voiceStatus === "PROCESSING"
+                      ? "Processing intent..."
+                      : voiceStatus === "SUCCESS"
+                      ? "Command Dispatched!"
+                      : "Tap Microphone to Speak"}
+                  </span>
                 </p>
                 <p className="text-xs text-slate-400">
-                  Language: <span className="font-semibold text-cyan-300">{voiceLang === "en-US" ? "English (US)" : "Bengali (বাংলা)"}</span>
+                  Engine: <span className="font-semibold text-cyan-300">{voiceLang === "en-US" ? "English (US)" : "Bengali (বাংলা)"}</span>
                 </p>
               </div>
 
+              {/* Error Message if Permission Denied */}
+              {voiceErrorMsg && (
+                <div className="w-full p-3 rounded-xl bg-red-950/80 border border-red-500/40 text-xs text-red-300 flex items-center gap-2 text-left">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-400" />
+                  <span className="flex-1">{voiceErrorMsg}</span>
+                  <button
+                    onClick={toggleVoice}
+                    className="px-2 py-1 rounded bg-red-800 text-[10px] text-white font-semibold"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
+              {/* Real-time Transcript */}
               {transcript && (
                 <div className="w-full p-3 rounded-xl bg-slate-900/80 border border-cyan-500/30 text-xs text-cyan-300 font-medium">
                   "{transcript}"
@@ -1083,6 +1480,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               )}
             </div>
 
+            {/* Confirmation Gate for High-Risk Intents */}
             {pendingVoiceIntent && (
               <div className="glass-panel rounded-2xl p-4 border-amber-500/40 bg-amber-950/20 flex flex-col gap-3 animate-pulse">
                 <div className="flex items-center gap-2 text-amber-400 font-bold text-xs">
@@ -1116,6 +1514,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               </div>
             )}
 
+            {/* Quick Presets */}
             <div className="glass-panel rounded-2xl p-4 flex flex-col gap-2.5 text-left">
               <p className="text-xs font-semibold text-slate-300">Quick Voice Automation Presets:</p>
               <div className="grid grid-cols-2 gap-2">
@@ -1150,6 +1549,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               </div>
             </div>
 
+            {/* Execution History */}
             {voiceLog.length > 0 && (
               <div className="glass-panel rounded-2xl p-4 flex flex-col gap-2 text-left">
                 <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Recent Executions</p>
@@ -1163,9 +1563,11 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
           </div>
         )}
 
-        {/* TAB 3: SECURITY & SESSION CONTROL */}
+        {/* ======================================================== */}
+        {/* TAB 3: SECURITY & SESSION CONTROL                         */}
+        {/* ======================================================== */}
         {activeTab === "security" && (
-          <div className="flex-1 flex flex-col p-4 gap-4 bg-[#070A13]">
+          <div className="flex-1 flex flex-col p-4 gap-4 bg-[#070A13] overflow-y-auto">
             <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
                 <ShieldAlert className="w-4 h-4 text-cyan-400" />
@@ -1179,6 +1581,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                 <p><span className="text-slate-500">Session Token:</span> {authToken.slice(0, 16)}...</p>
                 <p><span className="text-slate-500">Transport:</span> Encrypted WebSockets & WebRTC</p>
                 <p><span className="text-slate-500">Stream Status:</span> {streamStatus}</p>
+                <p><span className="text-slate-500">Zoom Level:</span> {zoomLevel}%</p>
               </div>
             </div>
 
@@ -1193,8 +1596,15 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         )}
       </main>
 
-      {/* Streamlined Bottom Navigation Bar: Screen, Voice, Security */}
-      <nav className="h-14 bg-[#0E1526] border-t border-cyan-500/20 grid grid-cols-3 items-center px-4 z-20">
+      {/* ======================================================== */}
+      {/* FIXED FOOTER NAVIGATION (ALWAYS VISIBLE, NO SCROLL)      */}
+      {/* ======================================================== */}
+      <nav 
+        className="h-14 bg-[#0E1526] border-t border-cyan-500/20 grid grid-cols-3 items-center px-4 z-30 flex-shrink-0"
+        style={{
+          paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0px)",
+        }}
+      >
         {[
           { id: "screen", label: "Live Desktop", icon: Tv },
           { id: "voice", label: "Voice Automation", icon: Mic },
@@ -1206,7 +1616,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
-              className={`flex flex-col items-center justify-center gap-1 py-1 transition-colors ${
+              className={`flex flex-col items-center justify-center gap-0.5 py-1 transition-colors ${
                 isActive ? "text-cyan-400 font-bold" : "text-slate-500 hover:text-slate-300"
               }`}
             >
