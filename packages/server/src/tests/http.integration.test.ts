@@ -150,6 +150,13 @@ async function runHttpTests() {
   const realHost = await connectSocket({ isHost: true, hostCredential: credential });
   const approvedEvents: Array<Record<string, unknown>> = [];
   realHost.socket.on("pairing:approved", (payload) => approvedEvents.push(payload));
+  realHost.socket.on("host:terminal:spawn", (payload: any) => {
+    realHost.socket.emit("host:terminal:ready", {
+      sessionId: payload.sessionId,
+      cols: payload.cols || 80,
+      rows: payload.rows || 24,
+    });
+  });
 
   const challengeData: any = await (await fetch(`${BASE}/api/pairing/challenge`)).json();
   await fetch(`${BASE}/api/pairing/request`, {

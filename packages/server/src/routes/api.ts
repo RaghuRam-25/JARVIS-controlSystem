@@ -276,9 +276,20 @@ apiRouter.post("/api/voice/intent", requireSession, async (req: Request, res: Re
     });
   }
 
+  // Execution of Windows automation only happens on the Windows Host Agent.
+  // On Railway, this endpoint cannot directly execute OS commands.
+  if (!CONFIG.IS_HOST_AGENT) {
+    return res.json({
+      success: false,
+      intent,
+      message: "Voice execution requires the Windows Host Agent to be connected. Use the Socket.IO voice:execute event instead.",
+    });
+  }
+
   const result = await automationExecutor.executeIntent(intent);
   return res.json({ success: result.success, intent, result });
 });
+
 
 // Releases the Host credential to the Host Deck UI.
 // Allowed for loopback callers (local desktop/dev) and cloud deployments

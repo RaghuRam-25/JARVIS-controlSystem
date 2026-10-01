@@ -70,7 +70,7 @@ const io = new SocketIOServer(server, {
 setupSocketHandlers(io);
 
 // Start server
-server.listen(CONFIG.PORT, CONFIG.HOST_BIND_ADDRESS, () => {
+server.listen(CONFIG.PORT, CONFIG.HOST_BIND_ADDRESS, async () => {
   const primaryIp = getPrimaryLocalIp();
   const allIps = getLocalIpAddresses();
 
@@ -87,6 +87,44 @@ server.listen(CONFIG.PORT, CONFIG.HOST_BIND_ADDRESS, () => {
     console.log(`    - ${iface.name}: ${iface.address} (${iface.isWireless ? "Wi-Fi" : "Ethernet"})`);
   });
   console.log("=================================================");
+
+  // ─── Windows Host Agent: Outbound Railway Bridge ─────────────────────────
+  //
+  // When IS_HOST_AGENT=true and JARVIS_SERVER_URL is set, this process is
+  // running on the Windows laptop. We start an OUTBOUND Socket.IO connection
+  // to the Railway Server so the remote controller can reach Windows automation.
+  //
+  // This block must NEVER run on the Railway server itself.
+  // Railway must NOT set IS_HOST_AGENT=true.
+  //
+  if (CONFIG.IS_HOST_AGENT && CONFIG.JARVIS_SERVER_URL) {
+    console.log("=================================================");
+    console.log("  HOST AGENT BRIDGE — RAILWAY CONNECTION         ");
+    console.log("=================================================");
+    console.log(`  Railway Server : ${CONFIG.JARVIS_SERVER_URL}`);
+    console.log(`  Platform       : ${process.platform}`);
+    console.log("=================================================");
+
+    // Dynamically import to avoid loading socket.io-client on Railway
+    const { startHostAgentBridge } = await import("./services/hostAgentBridge.js");
+    startHostAgentBridge(CONFIG.JARVIS_SERVER_URL);
+
+    // Clean shutdown
+    process.on("SIGINT", async () => {
+      const { stopHostAgentBridge } = await import("./services/hostAgentBridge.js");
+      stopHostAgentBridge();
+      process.exit(0);
+    });
+    process.on("SIGTERM", async () => {
+      const { stopHostAgentBridge } = await import("./services/hostAgentBridge.js");
+      stopHostAgentBridge();
+      process.exit(0);
+    });
+  } else if (CONFIG.IS_HOST_AGENT && !CONFIG.JARVIS_SERVER_URL) {
+    console.warn("[JARVIS] IS_HOST_AGENT=true but JARVIS_SERVER_URL is not set.");
+    console.warn("[JARVIS] Add JARVIS_SERVER_URL=https://jarvisserver-production-613e.up.railway.app to your .env");
+    console.warn("[JARVIS] Running in LOCAL-ONLY mode (no Railway bridge).");
+  }
 });
 
 export { app, server, io };

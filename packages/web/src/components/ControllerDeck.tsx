@@ -300,7 +300,29 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       alert("Session was revoked by Host PC.");
       handleDisconnect();
     });
+
+    // Windows Host Agent connection state
+    socket.off("host:offline");
+    socket.on("host:offline", ({ event, message }: { event: string; message: string }) => {
+      console.warn(`[JARVIS] HOST_OFFLINE for event "${event}": ${message}`);
+      setVoiceLog((prev) => [
+        `[${new Date().toLocaleTimeString()}] ⚠ HOST OFFLINE: ${message}`,
+        ...prev.slice(0, 10),
+      ]);
+    });
+
+    socket.off("host:status");
+    socket.on("host:status", ({ online }: { online: boolean }) => {
+      console.log(`[JARVIS] Windows Host Agent status: ${online ? "ONLINE" : "OFFLINE"}`);
+      if (!online) {
+        setVoiceLog((prev) => [
+          `[${new Date().toLocaleTimeString()}] ⚠ Windows Host Agent disconnected`,
+          ...prev.slice(0, 10),
+        ]);
+      }
+    });
   }, [initWebRTCViewer, handleDisconnect]);
+
 
   // Restore saved session from localStorage
   useEffect(() => {

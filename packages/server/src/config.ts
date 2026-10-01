@@ -29,6 +29,22 @@ export const CONFIG = {
   DATA_DIR: readString("DATA_DIR", "") || path.join(os.homedir(), ".jarvis-host"),
 
   /**
+   * JARVIS_SERVER_URL — set ONLY on the Windows Host Agent.
+   * When set, the Host Agent will establish an outbound authenticated
+   * Socket.IO connection to this Railway Server URL.
+   * Example: https://jarvisserver-production-613e.up.railway.app
+   * Leave empty on Railway itself (the server does not connect to itself).
+   */
+  JARVIS_SERVER_URL: readString("JARVIS_SERVER_URL", ""),
+
+  /**
+   * IS_HOST_AGENT — set to "true" on the Windows Host Agent.
+   * This enables the outbound Railway bridge and Windows-side execution.
+   * On Railway (cloud server), this must NOT be set.
+   */
+  IS_HOST_AGENT: readString("IS_HOST_AGENT", "false") === "true",
+
+  /**
    * The public URL at which this server is reachable from the internet.
    * Resolution order:
    *   1. PUBLIC_SIGNALING_URL (explicit override)
