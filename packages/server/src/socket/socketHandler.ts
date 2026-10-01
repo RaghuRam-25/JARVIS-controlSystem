@@ -141,11 +141,11 @@ export function setupSocketHandlers(io: SocketIOServer) {
 
       if (isHostAgent) {
         socket.join("windows-host-room");
-        screenStreamManager.registerHost(socket.id);
+        screenStreamManager.registerHost(socket.id, true);
         console.log(`[JARVIS RELAY] Windows Host Agent registered: socket=${socket.id}`);
       } else {
         socket.join("host-ui-room");
-        screenStreamManager.registerHost(socket.id);
+        screenStreamManager.registerHost(socket.id, false);
         console.log(`[JARVIS RELAY] Web Host Deck registered: socket=${socket.id}`);
       }
 
@@ -275,20 +275,30 @@ export function setupSocketHandlers(io: SocketIOServer) {
 
     socket.on("webrtc:signal", (data) => {
       const parsed = WebRTCSignalSchema.safeParse(data);
-      if (!parsed.success) return;
+      if (!parsed.success) {
+        console.warn("[JARVIS RAILWAY] Invalid WebRTC signal schema:", parsed.error.issues);
+        return;
+      }
 
       if (isHost) {
-        // Forward signal from Host to target viewer or broadcast
+        // Forward signal from Host (answer, candidate, ready, screen_stopped)
+        console.log(`[JARVIS RAILWAY] Host WebRTC signal (${parsed.data.type}) relayed -> target: ${parsed.data.target || "broadcast"}`);
         if (parsed.data.target) {
           io.to(parsed.data.target).emit("webrtc:signal", { ...parsed.data, sender: socket.id });
         } else {
           socket.broadcast.emit("webrtc:signal", { ...parsed.data, sender: socket.id });
         }
       } else {
-        // Viewer sending signal to Host
-        const hostSocketId = screenStreamManager.getHostSocketId();
-        if (hostSocketId) {
-          io.to(hostSocketId).emit("webrtc:signal", { ...parsed.data, sender: socket.id });
+        // Forward signal from Viewer (offer, candidate, ready, request_offer)
+        console.log(`[JARVIS RAILWAY] Viewer ${socket.id} WebRTC signal (${parsed.data.type}) relayed to Host rooms`);
+        
+        // Broadcast signal to all Host UI broadcasters in host-ui-room and host-room
+        io.to("host-ui-room").emit("webrtc:signal", { ...parsed.data, sender: socket.id });
+        io.to("host-room").emit("webrtc:signal", { ...parsed.data, sender: socket.id });
+
+        // If target was specifically designated, also emit to target
+        if (parsed.data.target) {
+          io.to(parsed.data.target).emit("webrtc:signal", { ...parsed.data, sender: socket.id });
         }
       }
     });

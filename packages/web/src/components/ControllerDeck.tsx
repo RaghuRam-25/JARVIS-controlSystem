@@ -274,16 +274,21 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     const streamer = new WebRTCStreamer(socket);
     webrtcStreamerRef.current = streamer;
 
+    // Signal Host that a paired viewer is actively waiting for screen stream
+    socket.emit("webrtc:signal", { type: "request_offer" });
+
     streamer.createViewerConnection((stream) => {
+      console.log("[JARVIS VIEWER] Stream received with tracks:", stream.getTracks().length);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current
           .play()
           .then(() => {
+            console.log("[JARVIS VIEWER] Video element playing live stream");
             setStreamStatus("STREAMING_LIVE");
           })
           .catch((err) => {
-            console.warn("Autoplay notice, waiting for interaction:", err);
+            console.warn("[JARVIS VIEWER] Video play notice, waiting for interaction:", err);
             setStreamStatus("STREAMING_LIVE");
           });
       }
