@@ -27,7 +27,10 @@ export function getSocket(serverUrl?: string, options?: SocketAuthOptions, force
   }
 
   if (socketInstance) {
-    socketInstance.disconnect();
+    try {
+      socketInstance.removeAllListeners();
+      socketInstance.disconnect();
+    } catch {}
     socketInstance = null;
   }
 
@@ -48,7 +51,10 @@ export function getSocket(serverUrl?: string, options?: SocketAuthOptions, force
 
 export function disconnectSocket() {
   if (socketInstance) {
-    socketInstance.disconnect();
+    try {
+      socketInstance.removeAllListeners();
+      socketInstance.disconnect();
+    } catch {}
     socketInstance = null;
   }
 }

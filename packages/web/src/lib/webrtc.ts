@@ -7,6 +7,7 @@ export class WebRTCStreamer {
   private socket: Socket;
   private onRemoteStreamCallback: ((stream: MediaStream) => void) | null = null;
   private candidateQueue: any[] = [];
+  private signalListener: ((data: any) => Promise<void>) | null = null;
 
   constructor(socket: Socket) {
     this.socket = socket;
@@ -14,7 +15,9 @@ export class WebRTCStreamer {
   }
 
   private initSocketListeners() {
-    this.socket.on("webrtc:signal", async (data: any) => {
+    this.removeSocketListeners();
+
+    this.signalListener = async (data: any) => {
       if (data.type === "offer") {
         await this.handleOffer(data);
       } else if (data.type === "answer") {
@@ -22,14 +25,22 @@ export class WebRTCStreamer {
       } else if (data.type === "candidate") {
         await this.handleCandidate(data);
       } else if (data.type === "ready") {
-        // Host has started screen sharing, recreate connection
         if (this.onRemoteStreamCallback) {
           await this.createViewerConnection(this.onRemoteStreamCallback);
         }
       } else if (data.type === "screen_stopped") {
         this.stop();
       }
-    });
+    };
+
+    this.socket.on("webrtc:signal", this.signalListener);
+  }
+
+  private removeSocketListeners() {
+    if (this.signalListener) {
+      this.socket.off("webrtc:signal", this.signalListener);
+      this.signalListener = null;
+    }
   }
 
   /**
@@ -45,7 +56,6 @@ export class WebRTCStreamer {
         audio: false,
       });
 
-      // Notify any connected viewers that host screen is now ready
       this.socket.emit("webrtc:signal", {
         type: "ready",
       });
@@ -65,7 +75,9 @@ export class WebRTCStreamer {
     this.candidateQueue = [];
 
     if (this.peerConnection) {
-      this.peerConnection.close();
+      try {
+        this.peerConnection.close();
+      } catch {}
       this.peerConnection = null;
     }
 
@@ -89,7 +101,6 @@ export class WebRTCStreamer {
       }
     };
 
-    // Create SDP Offer from Viewer to Host
     pc.addTransceiver("video", { direction: "recvonly" });
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -107,12 +118,13 @@ export class WebRTCStreamer {
    */
   private async handleOffer(data: any) {
     if (!this.localStream) {
-      // Screen not started yet
       return;
     }
 
     if (this.peerConnection) {
-      this.peerConnection.close();
+      try {
+        this.peerConnection.close();
+      } catch {}
       this.peerConnection = null;
     }
 
@@ -182,14 +194,26 @@ export class WebRTCStreamer {
   }
 
   public stop() {
+    this.removeSocketListeners();
+
     if (this.localStream) {
-      this.localStream.getTracks().forEach((t) => t.stop());
+      this.localStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {}
+      });
       this.localStream = null;
       this.socket.emit("webrtc:signal", { type: "screen_stopped" });
     }
+
     if (this.peerConnection) {
-      this.peerConnection.close();
+      try {
+        this.peerConnection.close();
+      } catch {}
       this.peerConnection = null;
     }
+
+    this.candidateQueue = [];
+    this.onRemoteStreamCallback = null;
   }
 }

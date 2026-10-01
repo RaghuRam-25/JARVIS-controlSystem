@@ -16,9 +16,6 @@ import {
   Code, 
   FolderOpen,
   Keyboard as KeyboardIcon,
-  MousePointer,
-  ChevronDown,
-  ChevronUp,
   RefreshCw,
   Move
 } from "lucide-react";
@@ -67,8 +64,135 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const pointerDownPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
   const isDraggingRef = useRef<boolean>(false);
   const longPressFiredRef = useRef<boolean>(false);
-  const multiTouchDistRef = useRef<number | null>(null);
   const lastTouchCenterRef = useRef<{ x: number; y: number } | null>(null);
+
+  const handleDisconnect = useCallback(() => {
+    // 1. Stop WebRTC streamer and clear video
+    if (webrtcStreamerRef.current) {
+      webrtcStreamerRef.current.stop();
+      webrtcStreamerRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    // 2. Clean up socket
+    if (socketRef.current) {
+      try {
+        socketRef.current.removeAllListeners();
+      } catch {}
+      socketRef.current = null;
+    }
+    disconnectSocket();
+
+    // 3. Clear stored tokens
+    localStorage.removeItem("jarvis_controller_token");
+    localStorage.removeItem("jarvis_host_ip");
+
+    // 4. Reset state
+    setIsPaired(false);
+    setAuthToken("");
+    setIsWaitingApproval(false);
+    setStreamStatus("DISCONNECTED");
+    setScannerActive(false);
+    setManualNonce("");
+    setManualChallengeId("");
+    setIsKeyboardOpen(false);
+    setIsDragMode(false);
+    setPendingVoiceIntent(null);
+    setTranscript("");
+
+    // 5. Reset refs
+    pointerDownPosRef.current = null;
+    isDraggingRef.current = false;
+    longPressFiredRef.current = false;
+    lastTouchCenterRef.current = null;
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
+
+  const initWebRTCViewer = useCallback((socket: any) => {
+    setStreamStatus("WAITING_FOR_SCREEN");
+    if (webrtcStreamerRef.current) {
+      webrtcStreamerRef.current.stop();
+      webrtcStreamerRef.current = null;
+    }
+
+    const streamer = new WebRTCStreamer(socket);
+    webrtcStreamerRef.current = streamer;
+
+    streamer.createViewerConnection((stream) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current
+          .play()
+          .then(() => {
+            setStreamStatus("STREAMING_LIVE");
+          })
+          .catch((err) => {
+            console.warn("Autoplay notice, waiting for interaction:", err);
+            setStreamStatus("STREAMING_LIVE");
+          });
+      }
+    });
+  }, []);
+
+  const connectToHost = useCallback((ip: string, token: string) => {
+    setStreamStatus("CONNECTING");
+    const serverUrl = resolveHostApiUrl(ip);
+    const socket = getSocket(serverUrl, { token }, true);
+    socketRef.current = socket;
+
+    socket.emit("auth:authenticate", { token });
+
+    const initConnection = () => {
+      console.log("Connected and authenticated with JARVIS host:", ip);
+      setIsPaired(true);
+      setIsWaitingApproval(false);
+      localStorage.setItem("jarvis_controller_token", token);
+      localStorage.setItem("jarvis_host_ip", ip);
+
+      initWebRTCViewer(socket);
+    };
+
+    socket.off("auth:success");
+    socket.on("auth:success", () => {
+      initConnection();
+    });
+
+    socket.off("auth:error");
+    socket.on("auth:error", ({ message }: { message: string }) => {
+      console.warn("Auth error from host:", message);
+      handleDisconnect();
+    });
+
+    socket.off("connect");
+    socket.on("connect", () => {
+      socket.emit("auth:authenticate", { token });
+      initConnection();
+    });
+
+    socket.off("voice:parsed");
+    socket.on("voice:parsed", (intent: any) => {
+      setPendingVoiceIntent(intent);
+    });
+
+    socket.off("voice:result");
+    socket.on("voice:result", (result: any) => {
+      setVoiceLog((prev) => [
+        `[${new Date().toLocaleTimeString()}] ${result.message}`,
+        ...prev.slice(0, 10),
+      ]);
+    });
+
+    socket.off("session:revoked");
+    socket.on("session:revoked", () => {
+      alert("Session was revoked by Host PC.");
+      handleDisconnect();
+    });
+  }, [initWebRTCViewer, handleDisconnect]);
 
   // Restore saved session from localStorage
   useEffect(() => {
@@ -79,7 +203,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       setHostIp(savedHostIp);
       connectToHost(savedHostIp, savedToken);
     }
-  }, []);
+  }, [connectToHost]);
 
   // Initialize Speech Recognition
   useEffect(() => {
@@ -112,79 +236,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       }
     }
   }, [voiceLang, transcript]);
-
-  const initWebRTCViewer = useCallback((socket: any) => {
-    setStreamStatus("WAITING_FOR_SCREEN");
-    if (webrtcStreamerRef.current) {
-      webrtcStreamerRef.current.stop();
-    }
-
-    const streamer = new WebRTCStreamer(socket);
-    webrtcStreamerRef.current = streamer;
-
-    streamer.createViewerConnection((stream) => {
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current
-          .play()
-          .then(() => {
-            setStreamStatus("STREAMING_LIVE");
-          })
-          .catch((err) => {
-            console.warn("Autoplay notice, waiting for interaction:", err);
-            setStreamStatus("STREAMING_LIVE");
-          });
-      }
-    });
-  }, []);
-
-  const connectToHost = useCallback((ip: string, token: string) => {
-    setStreamStatus("CONNECTING");
-    const serverUrl = resolveHostApiUrl(ip);
-    const socket = getSocket(serverUrl, { token }, true);
-    socketRef.current = socket;
-
-    // Immediately authenticate
-    socket.emit("auth:authenticate", { token });
-
-    const initConnection = () => {
-      console.log("Connected and authenticated with JARVIS host:", ip);
-      setIsPaired(true);
-      setIsWaitingApproval(false);
-      localStorage.setItem("jarvis_controller_token", token);
-      localStorage.setItem("jarvis_host_ip", ip);
-
-      // Initialize WebRTC screen viewer
-      initWebRTCViewer(socket);
-    };
-
-    socket.off("auth:success");
-    socket.on("auth:success", () => {
-      initConnection();
-    });
-
-    socket.off("connect");
-    socket.on("connect", () => {
-      socket.emit("auth:authenticate", { token });
-      initConnection();
-    });
-
-    socket.on("voice:parsed", (intent: any) => {
-      setPendingVoiceIntent(intent);
-    });
-
-    socket.on("voice:result", (result: any) => {
-      setVoiceLog((prev) => [
-        `[${new Date().toLocaleTimeString()}] ${result.message}`,
-        ...prev.slice(0, 10),
-      ]);
-    });
-
-    socket.on("session:revoked", () => {
-      alert("Session was revoked by Host PC.");
-      handleDisconnect();
-    });
-  }, [initWebRTCViewer]);
 
   // QR Scanner Handler
   const startQrScanner = () => {
@@ -240,7 +291,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         setIsWaitingApproval(false);
       });
 
-      // Wait briefly for socket connection to obtain socket.id if not already connected
       let socketId = socket.id;
       if (!socketId && !socket.connected) {
         socketId = await new Promise<string | undefined>((resolve) => {
@@ -258,7 +308,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         socketId: socketId || undefined,
       };
 
-      // Also emit via socket for real-time delivery
       socket.emit("pairing:request", pairingPayload);
 
       const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, serverUrl), {
@@ -280,17 +329,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       alert(`Connection failed: ${err.message}`);
       setIsWaitingApproval(false);
     }
-  };
-
-  const handleDisconnect = () => {
-    disconnectSocket();
-    localStorage.removeItem("jarvis_controller_token");
-    localStorage.removeItem("jarvis_host_ip");
-    setIsPaired(false);
-    setAuthToken("");
-    setIsWaitingApproval(false);
-    setStreamStatus("DISCONNECTED");
-    webrtcStreamerRef.current?.stop();
   };
 
   // ==========================================
@@ -344,7 +382,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const handlePointerDown = (e: React.PointerEvent<HTMLVideoElement>) => {
     if (e.pointerType === "touch" && !e.isPrimary) return;
     
-    // Ensure video is playing on mobile touch
     if (videoRef.current && videoRef.current.paused) {
       videoRef.current.play().catch(() => {});
     }
@@ -356,7 +393,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     longPressFiredRef.current = false;
     isDraggingRef.current = false;
 
-    // Show visual ripple
     setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: false });
 
     // Long press timer (500ms for Right Click)
@@ -377,7 +413,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       }, 400);
     }, 500);
 
-    // If explicit drag mode is toggled, trigger mouseDown immediately
     if (isDragMode) {
       isDraggingRef.current = true;
       socketRef.current?.emit("control:mouse_button", {
@@ -395,7 +430,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     const dx = Math.abs(e.clientX - pointerDownPosRef.current.x);
     const dy = Math.abs(e.clientY - pointerDownPosRef.current.y);
 
-    // If moved beyond 10px, cancel long-press right click
     if (dx > 10 || dy > 10) {
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
@@ -406,7 +440,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     const coords = calculateNormalizedCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    // If moved significantly and not already dragging, start dragging
     if ((dx > 15 || dy > 15) && !isDraggingRef.current && !longPressFiredRef.current) {
       isDraggingRef.current = true;
       socketRef.current?.emit("control:mouse_button", {
@@ -446,7 +479,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         });
       }
     } else if (!longPressFiredRef.current && pointerDownPosRef.current && coords) {
-      // Normal single tap -> Left Click
       socketRef.current?.emit("control:mouse_click", {
         normalizedX: coords.normalizedX,
         normalizedY: coords.normalizedY,
@@ -470,7 +502,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         x: (touch1.clientX + touch2.clientX) / 2,
         y: (touch1.clientY + touch2.clientY) / 2,
       };
-      multiTouchDistRef.current = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
     }
   };
 
@@ -493,7 +524,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
   const handleTouchEnd = () => {
     lastTouchCenterRef.current = null;
-    multiTouchDistRef.current = null;
   };
 
   // Keyboard Helpers
@@ -725,9 +755,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
       {/* Main Surface Area */}
       <main className="flex-1 flex flex-col overflow-hidden relative bg-black">
-        {/* ========================================= */}
         {/* TAB 1: DOMINANT TOUCH-TO-CONTROL LIVE SCREEN */}
-        {/* ========================================= */}
         {activeTab === "screen" && (
           <div className="flex-1 w-full h-full bg-black flex flex-col items-center justify-center relative overflow-hidden">
             {/* Visual Touch Ripple */}
@@ -848,12 +876,9 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
           </div>
         )}
 
-        {/* ========================================= */}
         {/* TAB 2: VOICE AUTOMATION & INTENTS */}
-        {/* ========================================= */}
         {activeTab === "voice" && (
           <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto bg-[#070A13]">
-            {/* Voice Command Button */}
             <div className="glass-panel rounded-2xl p-6 flex flex-col items-center text-center gap-4">
               <button
                 onClick={toggleVoice}
@@ -882,7 +907,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               )}
             </div>
 
-            {/* Sensitive Execution Approval Card */}
             {pendingVoiceIntent && (
               <div className="glass-panel rounded-2xl p-4 border-amber-500/40 bg-amber-950/20 flex flex-col gap-3 animate-pulse">
                 <div className="flex items-center gap-2 text-amber-400 font-bold text-xs">
@@ -916,7 +940,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               </div>
             )}
 
-            {/* Quick Automation Presets */}
             <div className="glass-panel rounded-2xl p-4 flex flex-col gap-2.5 text-left">
               <p className="text-xs font-semibold text-slate-300">Quick Voice Automation Presets:</p>
               <div className="grid grid-cols-2 gap-2">
@@ -951,7 +974,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               </div>
             </div>
 
-            {/* Voice Activity Log */}
             {voiceLog.length > 0 && (
               <div className="glass-panel rounded-2xl p-4 flex flex-col gap-2 text-left">
                 <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Recent Executions</p>
@@ -965,9 +987,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
           </div>
         )}
 
-        {/* ========================================= */}
         {/* TAB 3: SECURITY & SESSION CONTROL */}
-        {/* ========================================= */}
         {activeTab === "security" && (
           <div className="flex-1 flex flex-col p-4 gap-4 bg-[#070A13]">
             <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">

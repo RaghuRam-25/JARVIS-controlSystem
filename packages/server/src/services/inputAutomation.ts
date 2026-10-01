@@ -1,4 +1,4 @@
-import { spawn, execSync } from "child_process";
+import { spawn, execSync, ChildProcessWithoutNullStreams } from "child_process";
 import { MouseMove, MouseClick, MouseButtonAction, MouseScroll, KeyboardKey, KeyboardType } from "@jarvis/shared";
 
 export interface DisplayMetrics {
@@ -11,7 +11,7 @@ const ALLOWED_MOUSE_BUTTONS = new Set(["left", "right", "middle"]);
 
 export class InputAutomationService {
   private displayMetrics: DisplayMetrics = { width: 1920, height: 1080, scaleFactor: 1 };
-  private psProcess: any = null;
+  private psProcess: ChildProcessWithoutNullStreams | null = null;
   private currentMouseX = 960;
   private currentMouseY = 540;
 
@@ -57,7 +57,8 @@ export class InputAutomationService {
   }
 
   /**
-   * Persistent PowerShell session compiled with User32.dll SendInput for instant 0ms latency
+   * Persistent PowerShell session compiled with User32.dll SendInput for instant 0ms latency.
+   * Compiles native C# User32 wrappers via Base64 to prevent any PowerShell here-string whitespace errors.
    */
   private initFastInputProcess() {
     if (process.platform !== "win32") {
@@ -66,86 +67,82 @@ export class InputAutomationService {
     }
 
     const csharpCode = `
-      using System;
-      using System.Runtime.InteropServices;
+using System;
+using System.Runtime.InteropServices;
 
-      public class WinInput {
-        [DllImport("user32.dll")]
-        public static extern bool SetCursorPos(int X, int Y);
+public class WinInputNative {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int X, int Y);
 
-        [DllImport("user32.dll")]
-        public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
 
-        [DllImport("user32.dll")]
-        public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
-        public const int MOUSEEVENTF_LEFTDOWN = 0x0002;
-        public const int MOUSEEVENTF_LEFTUP = 0x0004;
-        public const int MOUSEEVENTF_RIGHTDOWN = 0x0008;
-        public const int MOUSEEVENTF_RIGHTUP = 0x0010;
-        public const int MOUSEEVENTF_MIDDLEDOWN = 0x0020;
-        public const int MOUSEEVENTF_MIDDLEUP = 0x0040;
-        public const int MOUSEEVENTF_WHEEL = 0x0800;
-        public const int KEYEVENTF_KEYUP = 0x0002;
+  public const int MOUSEEVENTF_LEFTDOWN = 0x0002;
+  public const int MOUSEEVENTF_LEFTUP = 0x0004;
+  public const int MOUSEEVENTF_RIGHTDOWN = 0x0008;
+  public const int MOUSEEVENTF_RIGHTUP = 0x0010;
+  public const int MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+  public const int MOUSEEVENTF_MIDDLEUP = 0x0040;
+  public const int MOUSEEVENTF_WHEEL = 0x0800;
+  public const int KEYEVENTF_KEYUP = 0x0002;
 
-        public static void Move(int x, int y) {
-          SetCursorPos(x, y);
-        }
+  public static void Move(int x, int y) {
+    SetCursorPos(x, y);
+  }
 
-        public static void Click(string btn, bool isDouble) {
-          int down = MOUSEEVENTF_LEFTDOWN, up = MOUSEEVENTF_LEFTUP;
-          if (btn == "right") { down = MOUSEEVENTF_RIGHTDOWN; up = MOUSEEVENTF_RIGHTUP; }
-          else if (btn == "middle") { down = MOUSEEVENTF_MIDDLEDOWN; up = MOUSEEVENTF_MIDDLEUP; }
-          
-          mouse_event(down, 0, 0, 0, 0);
-          mouse_event(up, 0, 0, 0, 0);
-          if (isDouble) {
-            System.Threading.Thread.Sleep(50);
-            mouse_event(down, 0, 0, 0, 0);
-            mouse_event(up, 0, 0, 0, 0);
-          }
-        }
+  public static void Click(string btn, bool isDouble) {
+    int down = MOUSEEVENTF_LEFTDOWN, up = MOUSEEVENTF_LEFTUP;
+    if (btn == "right") { down = MOUSEEVENTF_RIGHTDOWN; up = MOUSEEVENTF_RIGHTUP; }
+    else if (btn == "middle") { down = MOUSEEVENTF_MIDDLEDOWN; up = MOUSEEVENTF_MIDDLEUP; }
+    
+    mouse_event(down, 0, 0, 0, 0);
+    mouse_event(up, 0, 0, 0, 0);
+    if (isDouble) {
+      System.Threading.Thread.Sleep(50);
+      mouse_event(down, 0, 0, 0, 0);
+      mouse_event(up, 0, 0, 0, 0);
+    }
+  }
 
-        public static void Button(string btn, string action) {
-          int flag = 0;
-          if (btn == "left") flag = action == "down" ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-          else if (btn == "right") flag = action == "down" ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
-          else if (btn == "middle") flag = action == "down" ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
-          if (flag != 0) mouse_event(flag, 0, 0, 0, 0);
-        }
+  public static void Button(string btn, string action) {
+    int flag = 0;
+    if (btn == "left") flag = action == "down" ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+    else if (btn == "right") flag = action == "down" ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+    else if (btn == "middle") flag = action == "down" ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+    if (flag != 0) mouse_event(flag, 0, 0, 0, 0);
+  }
 
-        public static void Scroll(int dy) {
-          mouse_event(MOUSEEVENTF_WHEEL, 0, 0, dy, 0);
-        }
-      }
-    `;
+  public static void Scroll(int dy) {
+    mouse_event(MOUSEEVENTF_WHEEL, 0, 0, dy, 0);
+  }
+}
+`;
 
     try {
-      const ps = spawn("powershell", ["-NoProfile", "-Command", "-"], {
+      const ps = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"], {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
-      // Register the error handler SYNCHRONOUSLY before any stdin writes,
-      // so the 'error' event (ENOENT on missing binary) is always caught.
       ps.on("error", (err: any) => {
-        console.warn("PowerShell input process notice:", err.message);
+        console.warn("[InputAutomation] PowerShell process error:", err.message);
         this.psProcess = null;
+      });
+
+      ps.stderr.on("data", (data: Buffer) => {
+        console.warn("[InputAutomation] PowerShell stderr:", data.toString().trim());
       });
 
       this.psProcess = ps;
 
-      const setupScript = `
-        Add-Type -TypeDefinition @"
-        ${csharpCode}
-        "@
-        Write-Output "READY"
-      \n`;
+      const b64 = Buffer.from(csharpCode).toString("base64");
+      const initScript = `$code = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${b64}")); Add-Type -TypeDefinition $code; Add-Type -AssemblyName System.Windows.Forms; Write-Output "INPUT_READY"\n`;
 
-      // Defer the first write to the next tick so the 'error' handler
-      // has a chance to fire if the binary is missing.
       process.nextTick(() => {
         if (this.psProcess && this.psProcess.stdin && !this.psProcess.stdin.destroyed) {
-          this.psProcess.stdin.write(setupScript);
+          this.psProcess.stdin.write(initScript);
           this.psProcess.stdin.uncork();
         }
       });
@@ -162,6 +159,8 @@ export class InputAutomationService {
       } catch {
         this.initFastInputProcess();
       }
+    } else {
+      this.initFastInputProcess();
     }
   }
 
@@ -173,12 +172,10 @@ export class InputAutomationService {
     let targetY = this.currentMouseY;
 
     if (data.isRelative && data.deltaX !== undefined && data.deltaY !== undefined) {
-      // Trackpad mode
       const sensitivity = 1.25;
       targetX = Math.max(0, Math.min(this.displayMetrics.width, this.currentMouseX + data.deltaX * sensitivity));
       targetY = Math.max(0, Math.min(this.displayMetrics.height, this.currentMouseY + data.deltaY * sensitivity));
     } else if (data.normalizedX !== undefined && data.normalizedY !== undefined) {
-      // Screen tap / touch mirror mode (scaling coordinate)
       targetX = Math.round(data.normalizedX * this.displayMetrics.width);
       targetY = Math.round(data.normalizedY * this.displayMetrics.height);
     } else if (data.absX !== undefined && data.absY !== undefined) {
@@ -189,7 +186,7 @@ export class InputAutomationService {
     this.currentMouseX = targetX;
     this.currentMouseY = targetY;
 
-    this.sendCommand(`[WinInput]::Move(${Math.round(targetX)}, ${Math.round(targetY)})`);
+    this.sendCommand(`[WinInputNative]::Move(${Math.round(targetX)}, ${Math.round(targetY)})`);
   }
 
   /**
@@ -201,7 +198,7 @@ export class InputAutomationService {
     }
     const isDouble = Boolean(data.double);
     const btn = ALLOWED_MOUSE_BUTTONS.has(data.button) ? data.button : "left";
-    this.sendCommand(`[WinInput]::Click('${btn}', ${isDouble ? "$true" : "$false"})`);
+    this.sendCommand(`[WinInputNative]::Click('${btn}', ${isDouble ? "$true" : "$false"})`);
   }
 
   /**
@@ -213,7 +210,7 @@ export class InputAutomationService {
     }
     const btn = ALLOWED_MOUSE_BUTTONS.has(data.button) ? data.button : "left";
     const action = data.action === "down" ? "down" : "up";
-    this.sendCommand(`[WinInput]::Button('${btn}', '${action}')`);
+    this.sendCommand(`[WinInputNative]::Button('${btn}', '${action}')`);
   }
 
   /**
@@ -221,7 +218,7 @@ export class InputAutomationService {
    */
   public handleMouseScroll(data: MouseScroll) {
     const scrollAmount = -Math.round(data.deltaY * 3);
-    this.sendCommand(`[WinInput]::Scroll(${scrollAmount})`);
+    this.sendCommand(`[WinInputNative]::Scroll(${scrollAmount})`);
   }
 
   /**
@@ -229,19 +226,13 @@ export class InputAutomationService {
    */
   public handleKeyboardType(data: KeyboardType) {
     if (!data.text) return;
-    // SendKeys escaping: braces are token syntax and quotes/backticks terminate
-    // the PowerShell string literal, so all of them must be neutralized.
     const escaped = this.escapeForSendKeys(data.text);
-    this.sendCommand(
-      `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escaped}')`
-    );
+    this.sendCommand(`[System.Windows.Forms.SendKeys]::SendWait('${escaped}')`);
   }
 
   /**
    * Escapes untrusted text for embedding inside a single-quoted PowerShell
    * literal that is then passed to SendKeys.
-   *
-   * Order matters: PowerShell escapes the quote first, then SendKeys braces.
    */
   private escapeForSendKeys(text: string): string {
     return text
@@ -254,10 +245,6 @@ export class InputAutomationService {
 
   /**
    * Remote Key Action (Special keys like Enter, Backspace, Esc, Shortcuts)
-   *
-   * Only keys in the allow-list below can be emitted. The incoming `key` value
-   * is attacker-controlled, and it is written into a PowerShell command line, so
-   * accepting arbitrary text would allow arbitrary command execution.
    */
   public handleKeyboardKey(data: KeyboardKey) {
     const keyMap: Record<string, string> = {
@@ -299,9 +286,7 @@ export class InputAutomationService {
       if (data.modifiers.alt) prefix += "%";
     }
 
-    this.sendCommand(
-      `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${prefix}${sendKeyStr}')`
-    );
+    this.sendCommand(`[System.Windows.Forms.SendKeys]::SendWait('${prefix}${sendKeyStr}')`);
   }
 
   public cleanup() {
