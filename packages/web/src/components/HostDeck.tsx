@@ -335,43 +335,9 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
               <span>Regenerate QR Challenge Now</span>
             </button>
           </div>
-
-          {/* Screen Broadcaster Control */}
-          <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
-                <Radio className="w-4 h-4 text-cyan-400" />
-                <span>WebRTC Screen Broadcaster</span>
-              </div>
-              <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${isScreenStreaming ? "bg-emerald-950 text-emerald-300 border border-emerald-500/30" : "bg-slate-800 text-slate-400"}`}>
-                {isScreenStreaming ? "LIVE ON LAN" : "INACTIVE"}
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">
-              Low-latency hardware screen capture streamed via WebRTC to authenticated mobile controllers.
-            </p>
-            
-            <button
-              onClick={toggleScreenStream}
-              className={`w-full py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-2 transition-all ${
-                isScreenStreaming 
-                  ? "bg-red-950/60 text-red-300 border border-red-500/40 hover:bg-red-900" 
-                  : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 glow-cyan"
-              }`}
-            >
-              <Monitor className="w-4 h-4" />
-              <span>{isScreenStreaming ? "Stop Screen Stream" : "Start Live Screen Share"}</span>
-            </button>
-
-            {isScreenStreaming && (
-              <div className="mt-2 rounded-lg overflow-hidden border border-cyan-500/20 bg-black aspect-video flex items-center justify-center">
-                <video ref={screenVideoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
-              </div>
-            )}
-          </div>
         </section>
 
-        {/* Right Column: Active Devices, Pending Approvals, System Specs */}
+        {/* Right Column: Active Devices, Pending Approvals, System Specs, Screen Broadcaster */}
         <section className="lg:col-span-7 flex flex-col gap-6">
           {/* Host Pending Approval Modal / Banner */}
           {pendingRequests.length > 0 && (
@@ -505,6 +471,40 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* WebRTC Screen Broadcaster Control (Moved to lower-right area) */}
+          <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+                <Radio className="w-4 h-4 text-cyan-400" />
+                <span>WebRTC Screen Broadcaster</span>
+              </div>
+              <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full ${isScreenStreaming ? "bg-emerald-950 text-emerald-300 border border-emerald-500/30" : "bg-slate-800 text-slate-400"}`}>
+                {isScreenStreaming ? "LIVE ON LAN" : "INACTIVE"}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">
+              Low-latency hardware screen capture streamed via WebRTC to authenticated mobile controllers.
+            </p>
+            
+            <button
+              onClick={toggleScreenStream}
+              className={`w-full py-2.5 rounded-xl font-medium text-xs flex items-center justify-center gap-2 transition-all ${
+                isScreenStreaming 
+                  ? "bg-red-950/60 text-red-300 border border-red-500/40 hover:bg-red-900" 
+                  : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 glow-cyan"
+              }`}
+            >
+              <Monitor className="w-4 h-4" />
+              <span>{isScreenStreaming ? "Stop Screen Stream" : "Start Live Screen Share"}</span>
+            </button>
+
+            {isScreenStreaming && (
+              <div className="mt-2 rounded-lg overflow-hidden border border-cyan-500/20 bg-black aspect-video flex items-center justify-center">
+                <video ref={screenVideoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
+              </div>
+            )}
           </div>
         </section>
       </main>

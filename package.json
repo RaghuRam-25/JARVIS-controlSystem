@@ -27,13 +27,14 @@
     "desktop:build": "npm run build --workspace=@jarvis/desktop",
     "desktop:package": "npm run package --workspace=@jarvis/desktop",
     "desktop:installer": "npm run installer --workspace=@jarvis/desktop",
-    "test": "npm run test:security --workspace=@jarvis/server && npm run test:hardening --workspace=@jarvis/server && npm run test:http --workspace=@jarvis/server && npm run test:e2e --workspace=@jarvis/server && npm run test:reconnect --workspace=@jarvis/server && npm run test:env --workspace=@jarvis/web",
+    "test": "npm run test:security --workspace=@jarvis/server && npm run test:hardening --workspace=@jarvis/server && npm run test:http --workspace=@jarvis/server && npm run test:e2e --workspace=@jarvis/server && npm run test:reconnect --workspace=@jarvis/server && npm run test:voice --workspace=@jarvis/server && npm run test:env --workspace=@jarvis/web",
     "test:security": "npm run test:security --workspace=@jarvis/server",
     "test:hardening": "npm run test:hardening --workspace=@jarvis/server",
     "test:http": "npm run test:http --workspace=@jarvis/server",
     "test:env": "npm run test:env --workspace=@jarvis/web",
     "test:e2e": "npm run test:e2e --workspace=@jarvis/server",
     "test:reconnect": "npm run test:reconnect --workspace=@jarvis/server",
+    "test:voice": "npm run test:voice --workspace=@jarvis/server",
     "generate:icons": "powershell -ExecutionPolicy Bypass -File scripts/generate-icons.ps1"
   },
   "keywords": [

@@ -61,10 +61,15 @@ async function runE2ETests() {
   // Step 7: Voice Intent & Automation execution
   console.log("Step 7: Testing Voice Automation Pipeline (Open YouTube)...");
   const intent = voiceEngine.parseTranscript("open youtube and search chill coding music");
-  assert.strictEqual(intent.type, "BROWSER_YOUTUBE");
+  assert.ok(
+    ["BROWSER_YOUTUBE", "MULTI_STEP_PLAN"].includes(intent.type),
+    `Expected YouTube intent type, got ${intent.type}`
+  );
   assert.strictEqual(intent.requiresExplicitApproval, false);
-  // Note: Automation executor handles URL generation
-  assert.ok(intent.payload.url.includes("youtube.com"));
+  // Multi-step plan stores url in steps; legacy stores in payload.url
+  const hasUrl = intent.payload.url?.includes("youtube.com") ||
+    (Array.isArray(intent.payload.steps) && intent.payload.steps.some((s: any) => s.url?.includes("youtube.com")));
+  assert.ok(hasUrl, "YouTube URL must be present in intent payload");
 
   // Step 8: Disconnect & Emergency Revoke All
   console.log("Step 8: Testing Host Emergency Revoke All...");

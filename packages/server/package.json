@@ -12,7 +12,8 @@
     "test:hardening": "tsx src/tests/hardening.test.ts",
     "test:http": "tsx src/tests/http.integration.test.ts",
     "test:e2e": "tsx src/tests/e2e.test.ts",
-    "test:reconnect": "tsx src/tests/reconnect.lifecycle.test.ts"
+    "test:reconnect": "tsx src/tests/reconnect.lifecycle.test.ts",
+    "test:voice": "tsx src/tests/voice.multistep.test.ts"
   },
   "dependencies": {
     "@jarvis/shared": "*",

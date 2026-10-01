@@ -246,18 +246,41 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
 
   const handleVoiceExecute = async (payload: unknown) => {
     const parsed = VoiceExecutionRequestSchema.safeParse(payload);
-    if (!parsed.success || !parsed.data.approved) return;
+    if (!parsed.success || !parsed.data.approved) {
+      console.warn("[JARVIS VOICE] Rejected unapproved or malformed voice:execute payload");
+      return;
+    }
 
-    const intent = voiceEngine.parseTranscript(
-      (payload as any).rawTranscript || "",
-      (payload as any).language
-    );
+    // Re-parse the transcript on the Host Agent to generate the full intent
+    // (the Railway server may have already parsed it but the Host Agent must
+    //  re-parse so the context is maintained locally)
+    const rawTranscript = (payload as any).rawTranscript || "";
+    const lang = (payload as any).language;
+
+    const intent = voiceEngine.parseTranscript(rawTranscript, lang);
+
+    // Allow the controller to override/supplement the payload (e.g. add extra steps)
     if (parsed.data.modifiedPayload) {
       intent.payload = { ...intent.payload, ...parsed.data.modifiedPayload };
     }
 
+    // If the relay carried pre-parsed steps, prefer them
+    if (parsed.data.steps && parsed.data.steps.length > 0) {
+      intent.payload.steps = parsed.data.steps;
+    }
+
+    const stepCount = Array.isArray(intent.payload?.steps) ? intent.payload.steps.length : 1;
+    console.log(`[JARVIS VOICE] Executing intent: ${intent.type} (${stepCount} step${stepCount !== 1 ? "s" : ""})`);
+    console.log(`[JARVIS VOICE] Summary: ${intent.summary}`);
+
     const result = await automationExecutor.executeIntent(intent);
-    console.log(`[JARVIS WINDOWS] voice executed: ${intent.type} → ${result.success ? "OK" : "FAIL"}`);
+
+    if (result.success) {
+      console.log(`[JARVIS VOICE] ✓ Completed: ${result.message}`);
+    } else {
+      console.warn(`[JARVIS VOICE] ✗ Failed: ${result.message}`);
+    }
+
     socket.emit("host:voice:result", { intent, result });
     socket.emit("voice:result", result);
   };
