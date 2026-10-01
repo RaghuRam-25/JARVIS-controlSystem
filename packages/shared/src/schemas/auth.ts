@@ -7,6 +7,7 @@ export const PairingChallengeSchema = z.object({
   challengeId: z.string().uuid(),
   hostName: z.string().min(1),
   hostIp: z.string().min(1),
+  serverUrl: z.string().optional(),
   port: z.number().int().positive(),
   nonce: z.string().length(32),
   createdAt: z.number(),

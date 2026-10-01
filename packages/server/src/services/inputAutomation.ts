@@ -61,6 +61,7 @@ export class InputAutomationService {
    */
   private initFastInputProcess() {
     if (process.platform !== "win32") {
+      console.log("[InputAutomation] Non-Windows platform detected — input automation disabled.");
       return;
     }
 
@@ -120,14 +121,18 @@ export class InputAutomationService {
     `;
 
     try {
-      this.psProcess = spawn("powershell", ["-NoProfile", "-Command", "-"], {
+      const ps = spawn("powershell", ["-NoProfile", "-Command", "-"], {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
-      this.psProcess.on("error", (err: any) => {
+      // Register the error handler SYNCHRONOUSLY before any stdin writes,
+      // so the 'error' event (ENOENT on missing binary) is always caught.
+      ps.on("error", (err: any) => {
         console.warn("PowerShell input process notice:", err.message);
         this.psProcess = null;
       });
+
+      this.psProcess = ps;
 
       const setupScript = `
         Add-Type -TypeDefinition @"
@@ -136,10 +141,14 @@ export class InputAutomationService {
         Write-Output "READY"
       \n`;
 
-      if (this.psProcess.stdin && !this.psProcess.stdin.destroyed) {
-        this.psProcess.stdin.write(setupScript);
-        this.psProcess.stdin.uncork();
-      }
+      // Defer the first write to the next tick so the 'error' handler
+      // has a chance to fire if the binary is missing.
+      process.nextTick(() => {
+        if (this.psProcess && this.psProcess.stdin && !this.psProcess.stdin.destroyed) {
+          this.psProcess.stdin.write(setupScript);
+          this.psProcess.stdin.uncork();
+        }
+      });
     } catch (err) {
       console.warn("Failed to spawn persistent input process:", err);
       this.psProcess = null;

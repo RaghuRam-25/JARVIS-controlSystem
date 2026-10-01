@@ -27,6 +27,23 @@ export const CONFIG = {
   CORS_ORIGIN: readString("CORS_ORIGIN", "*"),
   PUBLIC_SIGNALING_URL: readString("PUBLIC_SIGNALING_URL", ""),
   DATA_DIR: readString("DATA_DIR", "") || path.join(os.homedir(), ".jarvis-host"),
+
+  /**
+   * The public URL at which this server is reachable from the internet.
+   * Resolution order:
+   *   1. PUBLIC_SIGNALING_URL (explicit override)
+   *   2. RAILWAY_PUBLIC_DOMAIN (auto-injected by Railway)
+   *   3. empty string → LAN-only mode (QR encodes the LAN IP)
+   */
+  get PUBLIC_SERVER_URL(): string {
+    const explicit = readString("PUBLIC_SIGNALING_URL", "");
+    if (explicit) return explicit.replace(/\/+$/, "");
+
+    const railwayDomain = readString("RAILWAY_PUBLIC_DOMAIN", "");
+    if (railwayDomain) return `https://${railwayDomain}`;
+
+    return "";
+  },
 };
 
 // An ephemeral secret silently invalidates every session on restart and breaks

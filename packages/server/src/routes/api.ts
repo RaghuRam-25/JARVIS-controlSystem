@@ -89,6 +89,7 @@ apiRouter.get("/api/pairing/challenge", async (req: Request, res: Response) => {
   try {
     const challenge = pairingManager.createChallenge();
     const primaryIp = getPrimaryLocalIp();
+    const publicUrl = CONFIG.PUBLIC_SERVER_URL;
     
     // QR Code encodes connection metadata for controller PWA
     const qrPayload = JSON.stringify({
@@ -97,6 +98,7 @@ apiRouter.get("/api/pairing/challenge", async (req: Request, res: Response) => {
       nonce: challenge.nonce,
       hostName: challenge.hostName,
       hostIp: primaryIp,
+      serverUrl: publicUrl || undefined,
       port: CONFIG.PORT,
       webPort: CONFIG.WEB_PORT,
       expiresAt: challenge.expiresAt,

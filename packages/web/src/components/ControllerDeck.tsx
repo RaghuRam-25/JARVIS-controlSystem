@@ -180,7 +180,8 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
             html5QrCode.stop();
             setScannerActive(false);
             const payload = JSON.parse(decodedText);
-            await submitPairingRequest(payload.hostIp, payload.challengeId, payload.nonce);
+            const targetHost = payload.serverUrl || payload.hostIp;
+            await submitPairingRequest(targetHost, payload.challengeId, payload.nonce);
           } catch (err) {
             console.error("Invalid QR payload", err);
           }
@@ -192,20 +193,22 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }, 200);
   };
 
-  const submitPairingRequest = async (ip: string, challengeId: string, nonce: string) => {
+  const submitPairingRequest = async (targetHost: string, challengeId: string, nonce: string) => {
     setIsWaitingApproval(true);
-    setHostIp(ip);
+    setHostIp(targetHost);
 
     try {
       const deviceName = `${navigator.userAgent.includes("Android") ? "Android Phone" : "Mobile Controller"} (${navigator.platform})`;
       const fingerprint = `client-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
+      const serverUrl = resolveHostApiUrl(targetHost);
+
       // The socket must exist before the request so the Agent knows where to
       // deliver the signed session token once the Host approves.
-      const socket = getSocket(ip);
+      const socket = getSocket(serverUrl);
       socketRef.current = socket;
 
-      const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, resolveHostApiUrl(ip)), {
+      const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, serverUrl), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

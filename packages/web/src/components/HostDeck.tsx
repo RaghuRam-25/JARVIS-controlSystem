@@ -306,7 +306,9 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
             <div className="mt-4 text-xs text-slate-400 space-y-1">
               <p className="font-medium text-slate-200">Scan with your Android phone/tablet PWA</p>
               <p className="text-[11px] text-cyan-400/80 font-mono">
-                Local Wi-Fi IP: {systemStatus?.primaryIp || "127.0.0.1"} : {API_PORT}
+                {serverUrl && !serverUrl.includes("localhost") && !serverUrl.includes("127.0.0.1")
+                  ? `Server: ${serverUrl}`
+                  : `Local Wi-Fi IP: ${systemStatus?.primaryIp || "127.0.0.1"} : ${API_PORT}`}
               </p>
             </div>
 

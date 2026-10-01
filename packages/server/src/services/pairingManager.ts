@@ -53,15 +53,18 @@ export class PairingManager extends EventEmitter {
     const hostIp = getPrimaryLocalIp();
     const now = Date.now();
 
+    const publicUrl = CONFIG.PUBLIC_SERVER_URL;
+
     const challenge: PairingChallenge = {
       challengeId,
       hostName: CONFIG.HOST_NAME,
       hostIp,
+      serverUrl: publicUrl || undefined,
       port: CONFIG.PORT,
       nonce,
       createdAt: now,
       expiresAt: now + CONFIG.PAIRING_NONCE_TTL_MS,
-      fingerprint: `${CONFIG.HOST_NAME}@${hostIp}`,
+      fingerprint: `${CONFIG.HOST_NAME}@${publicUrl || hostIp}`,
     };
 
     this.activeChallenges.set(challengeId, challenge);
