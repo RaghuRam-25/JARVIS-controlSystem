@@ -1,32 +1,33 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { 
   Camera, 
   Tv, 
-  MousePointer, 
-  Terminal as TermIcon, 
   Mic, 
   ShieldAlert, 
   LogOut, 
   Send, 
-  Play, 
-  Square, 
   Check, 
   X, 
-  Maximize2, 
-  Sliders, 
   Globe, 
   Sparkles, 
   Youtube, 
   Code, 
   FolderOpen,
-  Volume2
+  Keyboard as KeyboardIcon,
+  MousePointer,
+  ChevronDown,
+  ChevronUp,
+  RefreshCw,
+  Move
 } from "lucide-react";
 import { Html5Qrcode } from "html5-qrcode";
 import { getSocket, disconnectSocket } from "../lib/socket";
 import { WebRTCStreamer } from "../lib/webrtc";
 import { API_ENDPOINTS, apiUrl, resolveHostApiUrl } from "../lib/env";
+
+type StreamStatus = "DISCONNECTED" | "CONNECTING" | "WAITING_FOR_SCREEN" | "STREAMING_LIVE" | "ERROR";
 
 export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void }) {
   // Connection & Auth State
@@ -34,10 +35,21 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const [isWaitingApproval, setIsWaitingApproval] = useState<boolean>(false);
   const [authToken, setAuthToken] = useState<string>("");
   const [hostIp, setHostIp] = useState<string>("");
-  const [activeTab, setActiveTab] = useState<"screen" | "trackpad" | "terminal" | "voice" | "security">("screen");
+  const [activeTab, setActiveTab] = useState<"screen" | "voice" | "security">("screen");
   const [manualNonce, setManualNonce] = useState<string>("");
   const [manualChallengeId, setManualChallengeId] = useState<string>("");
   const [scannerActive, setScannerActive] = useState<boolean>(false);
+
+  // Stream & Interactive Screen State
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>("DISCONNECTED");
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState<boolean>(false);
+  const [keyboardText, setKeyboardText] = useState<string>("");
+  const [isDragMode, setIsDragMode] = useState<boolean>(false);
+  const [touchIndicator, setTouchIndicator] = useState<{ x: number; y: number; visible: boolean; isRightClick?: boolean }>({
+    x: 0,
+    y: 0,
+    visible: false,
+  });
 
   // Voice State
   const [isListening, setIsListening] = useState<boolean>(false);
@@ -46,18 +58,17 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const [pendingVoiceIntent, setPendingVoiceIntent] = useState<any>(null);
   const [voiceLog, setVoiceLog] = useState<string[]>([]);
 
-  // Terminal State
-  const [termOutput, setTermOutput] = useState<string>("JARVIS Interactive PowerShell Session Ready.\r\n");
-  const [termInput, setTermInput] = useState<string>("");
-  const [termSessionId, setTermSessionId] = useState<string>("");
-
   // Refs
   const socketRef = useRef<any>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const webrtcStreamerRef = useRef<WebRTCStreamer | null>(null);
   const recognitionRef = useRef<any>(null);
-  const trackpadRef = useRef<HTMLDivElement | null>(null);
-  const lastTouchRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pointerDownPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const isDraggingRef = useRef<boolean>(false);
+  const longPressFiredRef = useRef<boolean>(false);
+  const multiTouchDistRef = useRef<number | null>(null);
+  const lastTouchCenterRef = useRef<{ x: number; y: number } | null>(null);
 
   // Restore saved session from localStorage
   useEffect(() => {
@@ -102,7 +113,33 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }
   }, [voiceLang, transcript]);
 
-  const connectToHost = (ip: string, token: string) => {
+  const initWebRTCViewer = useCallback((socket: any) => {
+    setStreamStatus("WAITING_FOR_SCREEN");
+    if (webrtcStreamerRef.current) {
+      webrtcStreamerRef.current.stop();
+    }
+
+    const streamer = new WebRTCStreamer(socket);
+    webrtcStreamerRef.current = streamer;
+
+    streamer.createViewerConnection((stream) => {
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current
+          .play()
+          .then(() => {
+            setStreamStatus("STREAMING_LIVE");
+          })
+          .catch((err) => {
+            console.warn("Autoplay notice, waiting for interaction:", err);
+            setStreamStatus("STREAMING_LIVE");
+          });
+      }
+    });
+  }, []);
+
+  const connectToHost = useCallback((ip: string, token: string) => {
+    setStreamStatus("CONNECTING");
     const serverUrl = resolveHostApiUrl(ip);
     const socket = getSocket(serverUrl, { token }, true);
     socketRef.current = socket;
@@ -118,17 +155,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       localStorage.setItem("jarvis_host_ip", ip);
 
       // Initialize WebRTC screen viewer
-      const streamer = new WebRTCStreamer(socket);
-      webrtcStreamerRef.current = streamer;
-      streamer.createViewerConnection((stream) => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => {});
-        }
-      });
-
-      // Spawn interactive terminal
-      socket.emit("terminal:spawn", { shell: "powershell.exe", cols: 80, rows: 24 });
+      initWebRTCViewer(socket);
     };
 
     socket.off("auth:success");
@@ -140,14 +167,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     socket.on("connect", () => {
       socket.emit("auth:authenticate", { token });
       initConnection();
-    });
-
-    socket.on("terminal:ready", ({ sessionId }: { sessionId: string }) => {
-      setTermSessionId(sessionId);
-    });
-
-    socket.on("terminal:data", ({ data }: { data: string }) => {
-      setTermOutput((prev) => (prev + data).slice(-5000));
     });
 
     socket.on("voice:parsed", (intent: any) => {
@@ -165,7 +184,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       alert("Session was revoked by Host PC.");
       handleDisconnect();
     });
-  };
+  }, [initWebRTCViewer]);
 
   // QR Scanner Handler
   const startQrScanner = () => {
@@ -202,9 +221,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       const fingerprint = `client-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
       const serverUrl = resolveHostApiUrl(targetHost);
-
-      // The socket must exist before the request so the Agent knows where to
-      // deliver the signed session token once the Host approves.
       const socket = getSocket(serverUrl);
       socketRef.current = socket;
 
@@ -273,45 +289,226 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     setIsPaired(false);
     setAuthToken("");
     setIsWaitingApproval(false);
+    setStreamStatus("DISCONNECTED");
     webrtcStreamerRef.current?.stop();
   };
 
-  // Trackpad Touch Handler
-  const handleTouchStart = (e: React.TouchEvent) => {
-    if (e.touches.length === 1) {
-      lastTouchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  // ==========================================
+  // MATHEMATICAL COORDINATE PROJECTION LOGIC
+  // Accounts for aspect ratio, letterboxing, pillarboxing & object-fit: contain
+  // ==========================================
+  const calculateNormalizedCoords = (clientX: number, clientY: number): { normalizedX: number; normalizedY: number } | null => {
+    const video = videoRef.current;
+    if (!video) return null;
+
+    const rect = video.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+
+    const videoWidth = video.videoWidth || 1920;
+    const videoHeight = video.videoHeight || 1080;
+
+    const containerRatio = rect.width / rect.height;
+    const videoRatio = videoWidth / videoHeight;
+
+    let renderedWidth = rect.width;
+    let renderedHeight = rect.height;
+    let renderedLeft = 0;
+    let renderedTop = 0;
+
+    if (containerRatio > videoRatio) {
+      // Pillarbox (black bars on left/right)
+      renderedHeight = rect.height;
+      renderedWidth = rect.height * videoRatio;
+      renderedLeft = (rect.width - renderedWidth) / 2;
+      renderedTop = 0;
+    } else {
+      // Letterbox (black bars on top/bottom)
+      renderedWidth = rect.width;
+      renderedHeight = rect.width / videoRatio;
+      renderedLeft = 0;
+      renderedTop = (rect.height - renderedHeight) / 2;
     }
+
+    const offsetX = clientX - rect.left - renderedLeft;
+    const offsetY = clientY - rect.top - renderedTop;
+
+    const normalizedX = Math.max(0, Math.min(1, offsetX / renderedWidth));
+    const normalizedY = Math.max(0, Math.min(1, offsetY / renderedHeight));
+
+    return { normalizedX, normalizedY };
   };
 
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (!lastTouchRef.current || !socketRef.current) return;
-    if (e.touches.length === 1) {
-      const touch = e.touches[0];
-      const deltaX = touch.clientX - lastTouchRef.current.x;
-      const deltaY = touch.clientY - lastTouchRef.current.y;
-      lastTouchRef.current = { x: touch.clientX, y: touch.clientY };
+  // ==========================================
+  // TOUCH-TO-CONTROL EVENT HANDLERS
+  // ==========================================
+  const handlePointerDown = (e: React.PointerEvent<HTMLVideoElement>) => {
+    if (e.pointerType === "touch" && !e.isPrimary) return;
+    
+    // Ensure video is playing on mobile touch
+    if (videoRef.current && videoRef.current.paused) {
+      videoRef.current.play().catch(() => {});
+    }
 
-      socketRef.current.emit("control:mouse_move", {
-        deltaX,
-        deltaY,
-        isRelative: true,
+    const coords = calculateNormalizedCoords(e.clientX, e.clientY);
+    if (!coords) return;
+
+    pointerDownPosRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
+    longPressFiredRef.current = false;
+    isDraggingRef.current = false;
+
+    // Show visual ripple
+    setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: false });
+
+    // Long press timer (500ms for Right Click)
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      longPressFiredRef.current = true;
+      if (navigator.vibrate) navigator.vibrate(50);
+      setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: true });
+
+      socketRef.current?.emit("control:mouse_click", {
+        normalizedX: coords.normalizedX,
+        normalizedY: coords.normalizedY,
+        button: "right",
       });
-    } else if (e.touches.length === 2) {
-      // Two finger scroll
-      const deltaY = (e.touches[0].clientY + e.touches[1].clientY) / 2 - lastTouchRef.current.y;
-      socketRef.current.emit("control:mouse_scroll", { deltaX: 0, deltaY });
+
+      setTimeout(() => {
+        setTouchIndicator((prev) => ({ ...prev, visible: false }));
+      }, 400);
+    }, 500);
+
+    // If explicit drag mode is toggled, trigger mouseDown immediately
+    if (isDragMode) {
+      isDraggingRef.current = true;
+      socketRef.current?.emit("control:mouse_button", {
+        action: "down",
+        normalizedX: coords.normalizedX,
+        normalizedY: coords.normalizedY,
+        button: "left",
+      });
     }
   };
 
-  const sendMouseClick = (button: "left" | "right", double = false) => {
-    socketRef.current?.emit("control:mouse_click", { button, double });
+  const handlePointerMove = (e: React.PointerEvent<HTMLVideoElement>) => {
+    if (!pointerDownPosRef.current) return;
+
+    const dx = Math.abs(e.clientX - pointerDownPosRef.current.x);
+    const dy = Math.abs(e.clientY - pointerDownPosRef.current.y);
+
+    // If moved beyond 10px, cancel long-press right click
+    if (dx > 10 || dy > 10) {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+    }
+
+    const coords = calculateNormalizedCoords(e.clientX, e.clientY);
+    if (!coords) return;
+
+    // If moved significantly and not already dragging, start dragging
+    if ((dx > 15 || dy > 15) && !isDraggingRef.current && !longPressFiredRef.current) {
+      isDraggingRef.current = true;
+      socketRef.current?.emit("control:mouse_button", {
+        action: "down",
+        normalizedX: coords.normalizedX,
+        normalizedY: coords.normalizedY,
+        button: "left",
+      });
+    }
+
+    if (isDraggingRef.current) {
+      socketRef.current?.emit("control:mouse_move", {
+        normalizedX: coords.normalizedX,
+        normalizedY: coords.normalizedY,
+        isRelative: false,
+      });
+      setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: false });
+    }
   };
 
+  const handlePointerUp = (e: React.PointerEvent<HTMLVideoElement>) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+
+    const coords = calculateNormalizedCoords(e.clientX, e.clientY);
+
+    if (isDraggingRef.current) {
+      isDraggingRef.current = false;
+      if (coords) {
+        socketRef.current?.emit("control:mouse_button", {
+          action: "up",
+          normalizedX: coords.normalizedX,
+          normalizedY: coords.normalizedY,
+          button: "left",
+        });
+      }
+    } else if (!longPressFiredRef.current && pointerDownPosRef.current && coords) {
+      // Normal single tap -> Left Click
+      socketRef.current?.emit("control:mouse_click", {
+        normalizedX: coords.normalizedX,
+        normalizedY: coords.normalizedY,
+        button: "left",
+      });
+    }
+
+    pointerDownPosRef.current = null;
+    setTimeout(() => {
+      setTouchIndicator((prev) => ({ ...prev, visible: false }));
+    }, 200);
+  };
+
+  // Two-Finger Gesture Scroll on Touch Devices
+  const handleTouchStart = (e: React.TouchEvent<HTMLVideoElement>) => {
+    if (e.touches.length === 2) {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      lastTouchCenterRef.current = {
+        x: (touch1.clientX + touch2.clientX) / 2,
+        y: (touch1.clientY + touch2.clientY) / 2,
+      };
+      multiTouchDistRef.current = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLVideoElement>) => {
+    if (e.touches.length === 2 && lastTouchCenterRef.current) {
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const currentY = (touch1.clientY + touch2.clientY) / 2;
+      const deltaY = lastTouchCenterRef.current.y - currentY;
+      lastTouchCenterRef.current = {
+        x: (touch1.clientX + touch2.clientX) / 2,
+        y: currentY,
+      };
+
+      if (Math.abs(deltaY) > 2) {
+        socketRef.current?.emit("control:mouse_scroll", { deltaX: 0, deltaY });
+      }
+    }
+  };
+
+  const handleTouchEnd = () => {
+    lastTouchCenterRef.current = null;
+    multiTouchDistRef.current = null;
+  };
+
+  // Keyboard Helpers
   const sendKey = (key: string, modifiers = { ctrl: false, alt: false, shift: false, meta: false }) => {
     socketRef.current?.emit("control:key", { key, action: "press", modifiers });
   };
 
-  // Voice Handler
+  const sendTypedText = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!keyboardText) return;
+    socketRef.current?.emit("control:type", { text: keyboardText });
+    setKeyboardText("");
+  };
+
+  // Voice Helpers
   const toggleVoice = () => {
     if (isListening) {
       recognitionRef.current?.stop();
@@ -325,8 +522,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
           recognitionRef.current.start();
           setIsListening(true);
         } else {
-          // Fallback manual prompt
-          const text = prompt("Enter speech command (e.g. 'open youtube and play coding beats' or 'ভিএস কোড খোলো'):");
+          const text = prompt("Enter speech command (e.g. 'open vs code' or 'ক্রোম খোলো'):");
           if (text) {
             setTranscript(text);
             handleVoiceParse(text);
@@ -356,18 +552,9 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     setPendingVoiceIntent(null);
   };
 
-  // Terminal input send
-  const sendTerminalInput = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!termInput || !termSessionId) return;
-    socketRef.current?.emit("terminal:input", {
-      sessionId: termSessionId,
-      data: termInput + "\r\n",
-    });
-    setTermInput("");
-  };
-
-  // 1. Initial Unpaired / Pairing Screen
+  // ==========================================
+  // UNPAIRED / PAIRING SCREEN
+  // ==========================================
   if (!isPaired) {
     return (
       <div className="min-h-screen bg-[#070a13] text-[#f0f6fc] p-4 flex flex-col items-center justify-center">
@@ -378,9 +565,9 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
           <div>
             <h1 className="text-xl font-bold bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">
-              JARVIS Controller Deck
+              JARVIS Touch Controller
             </h1>
-            <p className="text-xs text-slate-400 mt-1">Scan host QR code on your Windows PC to pair</p>
+            <p className="text-xs text-slate-400 mt-1">Scan host QR code on your Windows PC to pair & control</p>
           </div>
 
           {isWaitingApproval ? (
@@ -420,10 +607,10 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
               {/* Manual Connect Fallback */}
               <div className="w-full pt-4 border-t border-slate-800 flex flex-col gap-3 text-left">
-                <p className="text-xs font-semibold text-slate-300">Or Manual Connect (LAN IP):</p>
+                <p className="text-xs font-semibold text-slate-300">Or Manual Connect (LAN IP / URL):</p>
                 <input
                   type="text"
-                  placeholder="Host IP (e.g. 192.168.1.50)"
+                  placeholder="Host IP or URL"
                   value={hostIp}
                   onChange={(e) => setHostIp(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 placeholder-slate-500 font-mono"
@@ -457,29 +644,75 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     );
   }
 
-  // 2. Main Authenticated Controller Workspace
+  // ==========================================
+  // AUTHENTICATED CONTROLLER WORKSPACE
+  // ==========================================
   return (
-    <div className="min-h-screen bg-[#070a13] text-[#f0f6fc] flex flex-col">
-      {/* Top Controller Header */}
-      <header className="px-4 py-3 bg-[#0E1526] border-b border-cyan-500/20 flex items-center justify-between">
+    <div className="min-h-screen bg-[#070a13] text-[#f0f6fc] flex flex-col select-none overflow-hidden touch-none">
+      {/* Top Header */}
+      <header className="px-3 py-2 bg-[#0E1526] border-b border-cyan-500/20 flex items-center justify-between z-20">
         <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span className={`w-2.5 h-2.5 rounded-full ${streamStatus === "STREAMING_LIVE" ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
           <div>
-            <h1 className="text-xs font-bold text-slate-100">JARVIS Remote</h1>
-            <p className="text-[10px] text-cyan-400/80 font-mono">{hostIp || "Host Connected"}</p>
+            <h1 className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+              <span>JARVIS Live Desktop</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-500/30">
+                {streamStatus === "STREAMING_LIVE" ? "LIVE" : streamStatus.replace(/_/g, " ")}
+              </span>
+            </h1>
+            <p className="text-[9px] text-slate-400 font-mono truncate max-w-[140px]">{hostIp || "Host Connected"}</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          {/* Quick Drag / Select Mode Toggle */}
+          <button
+            onClick={() => setIsDragMode((prev) => !prev)}
+            className={`px-2 py-1 rounded-lg text-[11px] font-semibold border transition-all flex items-center gap-1 ${
+              isDragMode 
+                ? "bg-amber-500/20 text-amber-300 border-amber-500/50 glow-amber" 
+                : "bg-slate-800 text-slate-300 border-slate-700"
+            }`}
+            title="Toggle Drag/Select Mode"
+          >
+            <Move className="w-3 h-3" />
+            <span>{isDragMode ? "Drag ON" : "Tap"}</span>
+          </button>
+
+          {/* Virtual Keyboard Toggle */}
+          <button
+            onClick={() => setIsKeyboardOpen((prev) => !prev)}
+            className={`p-1.5 rounded-lg border text-xs transition-colors ${
+              isKeyboardOpen 
+                ? "bg-cyan-500 text-slate-950 border-cyan-400" 
+                : "bg-slate-800 text-cyan-300 border-cyan-500/30 hover:bg-slate-700"
+            }`}
+            title="Toggle Virtual Keyboard"
+          >
+            <KeyboardIcon className="w-4 h-4" />
+          </button>
+
+          {/* Reconnect WebRTC Stream */}
+          <button
+            onClick={() => {
+              if (socketRef.current) initWebRTCViewer(socketRef.current);
+            }}
+            className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700 text-xs"
+            title="Refresh Stream"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+
           {/* Bengali / English Language Toggle */}
           <button
             onClick={() => setVoiceLang((prev) => (prev === "en-US" ? "bn-BD" : "en-US"))}
-            className="px-2.5 py-1 rounded-lg bg-slate-800 text-[11px] font-medium text-cyan-300 border border-cyan-500/20 flex items-center gap-1"
+            className="px-2 py-1 rounded-lg bg-slate-800 text-[11px] font-medium text-cyan-300 border border-cyan-500/20 flex items-center gap-1"
           >
             <Globe className="w-3 h-3" />
             <span>{voiceLang === "en-US" ? "EN" : "বাং"}</span>
           </button>
 
+          {/* Disconnect */}
           <button
             onClick={handleDisconnect}
             className="p-1.5 rounded-lg bg-red-950/60 text-red-400 hover:bg-red-900 border border-red-500/30 text-xs"
@@ -490,146 +723,136 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         </div>
       </header>
 
-      {/* Main Workspace Area */}
-      <main className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Tab 1: Screen Mirror */}
+      {/* Main Surface Area */}
+      <main className="flex-1 flex flex-col overflow-hidden relative bg-black">
+        {/* ========================================= */}
+        {/* TAB 1: DOMINANT TOUCH-TO-CONTROL LIVE SCREEN */}
+        {/* ========================================= */}
         {activeTab === "screen" && (
-          <div className="flex-1 bg-black flex flex-col items-center justify-center relative select-none">
+          <div className="flex-1 w-full h-full bg-black flex flex-col items-center justify-center relative overflow-hidden">
+            {/* Visual Touch Ripple */}
+            {touchIndicator.visible && (
+              <div
+                className={`absolute w-8 h-8 -ml-4 -mt-4 rounded-full pointer-events-none z-50 animate-ping ${
+                  touchIndicator.isRightClick ? "bg-amber-400 border-2 border-amber-200" : "bg-cyan-400 border-2 border-white"
+                }`}
+                style={{ left: touchIndicator.x, top: touchIndicator.y }}
+              />
+            )}
+
+            {/* Waiting for stream placeholder if not live */}
+            {streamStatus !== "STREAMING_LIVE" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center z-10 bg-[#070a13]/90">
+                <div className="w-10 h-10 rounded-full border-3 border-cyan-500 border-t-transparent animate-spin" />
+                <p className="text-sm font-semibold text-cyan-300">
+                  {streamStatus === "WAITING_FOR_SCREEN" ? "Waiting for Windows Screen Capture..." : "Connecting to Stream..."}
+                </p>
+                <p className="text-xs text-slate-400 max-w-xs">
+                  Make sure screen streaming is enabled on your Windows Host PC dashboard.
+                </p>
+                <button
+                  onClick={() => {
+                    if (socketRef.current) initWebRTCViewer(socketRef.current);
+                  }}
+                  className="mt-2 px-3 py-1.5 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-xs font-semibold"
+                >
+                  Retry Stream Connection
+                </button>
+              </div>
+            )}
+
+            {/* Live Interactive Video Surface */}
             <video
               ref={videoRef}
               autoPlay
               playsInline
               muted
-              className="w-full h-full object-contain cursor-crosshair"
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const normalizedX = (e.clientX - rect.left) / rect.width;
-                const normalizedY = (e.clientY - rect.top) / rect.height;
-                socketRef.current?.emit("control:mouse_click", {
-                  normalizedX,
-                  normalizedY,
-                  button: "left",
-                });
-              }}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="w-full h-full object-contain cursor-crosshair touch-none select-none"
             />
-            <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between pointer-events-none">
-              <span className="px-2.5 py-1 rounded-full bg-black/70 backdrop-blur-md text-[10px] font-mono text-cyan-400 border border-cyan-500/30">
-                Tap anywhere to click • Low Latency WebRTC
+
+            {/* Floating Top/Bottom On-Screen Keyboard Drawer */}
+            {isKeyboardOpen && (
+              <div className="absolute bottom-12 left-2 right-2 p-2.5 rounded-2xl bg-[#0e1526]/95 border border-cyan-500/40 backdrop-blur-md z-30 shadow-2xl flex flex-col gap-2 animate-in slide-in-from-bottom-5">
+                <div className="flex items-center justify-between pb-1 border-b border-slate-800">
+                  <span className="text-[11px] font-bold text-cyan-400 flex items-center gap-1.5">
+                    <KeyboardIcon className="w-3.5 h-3.5" />
+                    <span>Windows Remote Keyboard</span>
+                  </span>
+                  <button
+                    onClick={() => setIsKeyboardOpen(false)}
+                    className="p-1 rounded text-slate-400 hover:text-white"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Modifier & Special Action Keys */}
+                <div className="flex flex-wrap gap-1">
+                  {[
+                    { label: "Ctrl", key: "Ctrl" },
+                    { label: "Alt", key: "Alt" },
+                    { label: "Shift", key: "Shift" },
+                    { label: "Esc", key: "Escape" },
+                    { label: "Tab", key: "Tab" },
+                    { label: "Win", key: "Win" },
+                    { label: "Enter", key: "Enter" },
+                    { label: "⌫", key: "Backspace" },
+                    { label: "Space", key: "Space" },
+                    { label: "↑", key: "ArrowUp" },
+                    { label: "↓", key: "ArrowDown" },
+                    { label: "←", key: "ArrowLeft" },
+                    { label: "→", key: "ArrowRight" },
+                  ].map((k) => (
+                    <button
+                      key={k.label}
+                      onClick={() => sendKey(k.key)}
+                      className="px-2 py-1 rounded bg-slate-800 active:bg-cyan-500 active:text-slate-950 hover:bg-slate-700 text-[11px] font-mono font-semibold text-slate-200 border border-slate-700 transition-colors"
+                    >
+                      {k.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Direct Text Input & Send */}
+                <form onSubmit={sendTypedText} className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={keyboardText}
+                    onChange={(e) => setKeyboardText(e.target.value)}
+                    placeholder="Type words/URLs to send to Windows..."
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-cyan-400"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3 py-1.5 rounded-lg bg-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1"
+                  >
+                    <Send className="w-3 h-3" />
+                    <span>Send</span>
+                  </button>
+                </form>
+              </div>
+            )}
+
+            {/* Gesture Guide Overlay */}
+            <div className="absolute bottom-2 left-3 right-3 flex items-center justify-between pointer-events-none opacity-60">
+              <span className="px-2 py-0.5 rounded-full bg-black/80 backdrop-blur-sm text-[9px] font-mono text-cyan-400 border border-cyan-500/30">
+                Tap: Click • Hold: Right Click • 2-Finger: Scroll
               </span>
             </div>
           </div>
         )}
 
-        {/* Tab 2: Precision Virtual Trackpad */}
-        {activeTab === "trackpad" && (
-          <div className="flex-1 flex flex-col p-4 gap-3">
-            {/* Keyboard Shortcuts Toolbar */}
-            <div className="flex flex-wrap gap-1.5 p-2 rounded-xl bg-slate-900 border border-slate-800">
-              {["Ctrl", "Alt", "Shift", "Esc", "Tab", "Enter", "Backspace"].map((k) => (
-                <button
-                  key={k}
-                  onClick={() => sendKey(k)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-cyan-500/20 text-xs font-semibold text-slate-300 hover:text-cyan-300 border border-slate-700 transition-colors"
-                >
-                  {k}
-                </button>
-              ))}
-            </div>
-
-            {/* Large Trackpad Area */}
-            <div
-              ref={trackpadRef}
-              onTouchStart={handleTouchStart}
-              onTouchMove={handleTouchMove}
-              onTouchEnd={() => { lastTouchRef.current = null; }}
-              className="flex-1 rounded-2xl bg-gradient-to-b from-slate-900 to-[#0A0E17] border-2 border-cyan-500/30 touch-trackpad flex items-center justify-center glow-cyan cursor-crosshair relative"
-            >
-              <div className="text-center pointer-events-none opacity-40 space-y-1">
-                <MousePointer className="w-8 h-8 text-cyan-400 mx-auto" />
-                <p className="text-xs font-medium text-slate-300">High-Precision Virtual Trackpad</p>
-                <p className="text-[10px] text-slate-500">1-Finger Move • 2-Finger Scroll</p>
-              </div>
-            </div>
-
-            {/* Click Buttons */}
-            <div className="grid grid-cols-2 gap-3 h-16">
-              <button
-                onClick={() => sendMouseClick("left")}
-                className="rounded-xl bg-slate-800 active:bg-cyan-500 active:text-slate-950 font-bold text-xs text-slate-200 border border-slate-700 flex items-center justify-center transition-all"
-              >
-                Left Click
-              </button>
-              <button
-                onClick={() => sendMouseClick("right")}
-                className="rounded-xl bg-slate-800 active:bg-cyan-500 active:text-slate-950 font-bold text-xs text-slate-200 border border-slate-700 flex items-center justify-center transition-all"
-              >
-                Right Click
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Tab 3: Interactive Windows Terminal */}
-        {activeTab === "terminal" && (
-          <div className="flex-1 flex flex-col p-4 gap-3 bg-[#070A13]">
-            {/* Quick Macro Buttons */}
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {[
-                { label: "npm run dev", cmd: "npm run dev" },
-                { label: "git status", cmd: "git status" },
-                { label: "ls / dir", cmd: "dir" },
-                { label: "Clear", cmd: "clear" },
-              ].map((m) => (
-                <button
-                  key={m.label}
-                  onClick={() => {
-                    socketRef.current?.emit("terminal:input", {
-                      sessionId: termSessionId,
-                      data: m.cmd + "\r\n",
-                    });
-                  }}
-                  className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-mono text-cyan-400 whitespace-nowrap"
-                >
-                  {m.label}
-                </button>
-              ))}
-              <button
-                onClick={() => {
-                  socketRef.current?.emit("terminal:input", { sessionId: termSessionId, data: "\x03" });
-                }}
-                className="px-2.5 py-1 rounded-lg bg-red-950/60 text-red-400 border border-red-500/30 text-[11px] font-mono whitespace-nowrap"
-              >
-                Ctrl+C
-              </button>
-            </div>
-
-            {/* Terminal Buffer */}
-            <pre className="flex-1 p-3 rounded-xl bg-black border border-slate-800 font-mono text-[11px] text-emerald-400 overflow-y-auto whitespace-pre-wrap select-text">
-              {termOutput}
-            </pre>
-
-            {/* Terminal Input Bar */}
-            <form onSubmit={sendTerminalInput} className="flex gap-2">
-              <input
-                type="text"
-                value={termInput}
-                onChange={(e) => setTermInput(e.target.value)}
-                placeholder="Type PowerShell command..."
-                className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-slate-100 focus:outline-none focus:border-cyan-400"
-              />
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-lg bg-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center"
-              >
-                <Send className="w-3.5 h-3.5" />
-              </button>
-            </form>
-          </div>
-        )}
-
-        {/* Tab 4: Voice Commands & Antigravity Automation */}
+        {/* ========================================= */}
+        {/* TAB 2: VOICE AUTOMATION & INTENTS */}
+        {/* ========================================= */}
         {activeTab === "voice" && (
-          <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto">
+          <div className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto bg-[#070A13]">
             {/* Voice Command Button */}
             <div className="glass-panel rounded-2xl p-6 flex flex-col items-center text-center gap-4">
               <button
@@ -670,7 +893,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                 <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1 text-left">
                   <p className="text-xs font-semibold text-slate-200">{pendingVoiceIntent.summary}</p>
                   <p className="text-[10px] text-slate-400 font-mono">
-                    Intent: {pendingVoiceIntent.type} • Risk: {pendingVoiceIntent.riskLevel.toUpperCase()}
+                    Intent: {pendingVoiceIntent.type} • Risk: {pendingVoiceIntent.riskLevel?.toUpperCase()}
                   </p>
                 </div>
 
@@ -695,7 +918,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
             {/* Quick Automation Presets */}
             <div className="glass-panel rounded-2xl p-4 flex flex-col gap-2.5 text-left">
-              <p className="text-xs font-semibold text-slate-300">Quick Voice Presets:</p>
+              <p className="text-xs font-semibold text-slate-300">Quick Voice Automation Presets:</p>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => handleVoiceParse("open vs code")}
@@ -742,21 +965,24 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
           </div>
         )}
 
-        {/* Tab 5: Security & Session */}
+        {/* ========================================= */}
+        {/* TAB 3: SECURITY & SESSION CONTROL */}
+        {/* ========================================= */}
         {activeTab === "security" && (
-          <div className="flex-1 flex flex-col p-4 gap-4">
+          <div className="flex-1 flex flex-col p-4 gap-4 bg-[#070A13]">
             <div className="glass-panel rounded-2xl p-5 flex flex-col gap-3">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
                 <ShieldAlert className="w-4 h-4 text-cyan-400" />
-                <span>Session Security Details</span>
+                <span>Active Session Security</span>
               </div>
               <p className="text-xs text-slate-400">
-                Authenticated session is secured with signed HMAC tokens and restricted to the local Wi-Fi subnet.
+                Authenticated session is secured with signed HMAC tokens, paired with your Windows Host PC.
               </p>
               <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono space-y-1">
                 <p><span className="text-slate-500">Host IP:</span> {hostIp}</p>
-                <p><span className="text-slate-500">Token:</span> {authToken.slice(0, 16)}...</p>
-                <p><span className="text-slate-500">Transport:</span> Encrypted WebSocket</p>
+                <p><span className="text-slate-500">Session Token:</span> {authToken.slice(0, 16)}...</p>
+                <p><span className="text-slate-500">Transport:</span> Encrypted WebSockets & WebRTC</p>
+                <p><span className="text-slate-500">Stream Status:</span> {streamStatus}</p>
               </div>
             </div>
 
@@ -771,13 +997,11 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         )}
       </main>
 
-      {/* Bottom Mobile Navigation Bar */}
-      <nav className="h-16 bg-[#0E1526] border-t border-cyan-500/20 grid grid-cols-5 items-center px-1">
+      {/* Streamlined Bottom Navigation Bar: Screen, Voice, Security */}
+      <nav className="h-14 bg-[#0E1526] border-t border-cyan-500/20 grid grid-cols-3 items-center px-4 z-20">
         {[
-          { id: "screen", label: "Screen", icon: Tv },
-          { id: "trackpad", label: "Trackpad", icon: MousePointer },
-          { id: "terminal", label: "Terminal", icon: TermIcon },
-          { id: "voice", label: "Voice", icon: Mic },
+          { id: "screen", label: "Live Desktop", icon: Tv },
+          { id: "voice", label: "Voice Automation", icon: Mic },
           { id: "security", label: "Security", icon: ShieldAlert },
         ].map((tab) => {
           const Icon = tab.icon;
