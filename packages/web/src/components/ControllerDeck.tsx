@@ -22,7 +22,9 @@ import {
   ZoomIn,
   ZoomOut,
   RotateCcw,
-  AlertCircle
+  AlertCircle,
+  MoreVertical,
+  Maximize2
 } from "lucide-react";
 import { Html5Qrcode } from "html5-qrcode";
 import { getSocket, disconnectSocket } from "../lib/socket";
@@ -31,8 +33,6 @@ import { API_ENDPOINTS, apiUrl, resolveHostApiUrl } from "../lib/env";
 
 type StreamStatus = "DISCONNECTED" | "CONNECTING" | "WAITING_FOR_SCREEN" | "STREAMING_LIVE" | "ERROR";
 type VoiceStatus = "IDLE" | "LISTENING" | "PROCESSING" | "SUCCESS" | "ERROR";
-
-const ZOOM_LEVELS = [75, 80, 90, 100, 110, 125, 150];
 
 export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void }) {
   // Connection & Auth State
@@ -46,11 +46,18 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const [manualChallengeId, setManualChallengeId] = useState<string>("");
   const [scannerActive, setScannerActive] = useState<boolean>(false);
 
+  // Mobile Menu & UI Overlays
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+
   // Stream & Interactive Screen State
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("DISCONNECTED");
   const [keyboardText, setKeyboardText] = useState<string>("");
   const [isDragMode, setIsDragMode] = useState<boolean>(false);
-  const [zoomLevel, setZoomLevel] = useState<number>(100);
+  
+  // Remote Screen Dedicated Pinch Zoom & Pan State
+  const [screenScale, setScreenScale] = useState<number>(1);
+  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
   const [touchIndicator, setTouchIndicator] = useState<{ x: number; y: number; visible: boolean; isRightClick?: boolean }>({
     x: 0,
     y: 0,
@@ -83,14 +90,21 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
   // Refs
   const socketRef = useRef<any>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const webrtcStreamerRef = useRef<WebRTCStreamer | null>(null);
   const recognitionRef = useRef<any>(null);
+
+  // Gesture & Touch Refs
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const pointerDownPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const touchStartPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const hasMovedSignificantlyRef = useRef<boolean>(false);
+  const pinchStartDistRef = useRef<number | null>(null);
+  const pinchStartScaleRef = useRef<number>(1);
+  const panStartRef = useRef<{ touchX: number; touchY: number; panX: number; panY: number } | null>(null);
+  const lastTapTimeRef = useRef<number>(0);
   const isDraggingRef = useRef<boolean>(false);
   const longPressFiredRef = useRef<boolean>(false);
-  const lastTouchCenterRef = useRef<{ x: number; y: number } | null>(null);
 
   // Pairing & Scanner Refs
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
@@ -108,34 +122,25 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     hostIpRef.current = hostIp;
   }, [sessionId, authToken, hostIp]);
 
-  // Load saved zoom level
-  useEffect(() => {
-    const savedZoom = localStorage.getItem("jarvis_zoom_level");
-    if (savedZoom) {
-      const parsed = parseInt(savedZoom, 10);
-      if (ZOOM_LEVELS.includes(parsed)) setZoomLevel(parsed);
-    }
-  }, []);
-
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setTimeout(() => setToastMessage(null), 2500);
   };
 
-  const handleZoom = (delta: number) => {
-    const currentIndex = ZOOM_LEVELS.indexOf(zoomLevel);
-    let newIndex = currentIndex !== -1 ? currentIndex + delta : 3;
-    newIndex = Math.max(0, Math.min(ZOOM_LEVELS.length - 1, newIndex));
-    const newZoom = ZOOM_LEVELS[newIndex];
-    setZoomLevel(newZoom);
-    localStorage.setItem("jarvis_zoom_level", String(newZoom));
-    showToast(`Zoom: ${newZoom}%`);
+  // Zoom Helpers for Remote Screen
+  const handleZoomChange = (delta: number) => {
+    setScreenScale((prev) => {
+      const next = Math.max(1, Math.min(4, Math.round((prev + delta) * 10) / 10));
+      if (next === 1) setPanOffset({ x: 0, y: 0 });
+      showToast(`Screen Zoom: ${Math.round(next * 100)}%`);
+      return next;
+    });
   };
 
-  const resetZoom = () => {
-    setZoomLevel(100);
-    localStorage.setItem("jarvis_zoom_level", "100");
-    showToast("Zoom: 100%");
+  const resetScreenZoom = () => {
+    setScreenScale(1);
+    setPanOffset({ x: 0, y: 0 });
+    showToast("Screen Zoom Reset (100%)");
   };
 
   const stopQrScanner = useCallback(() => {
@@ -207,15 +212,16 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     setPendingVoiceIntent(null);
     setTranscript("");
     setVoiceStatus("IDLE");
+    setScreenScale(1);
+    setPanOffset({ x: 0, y: 0 });
 
     activeRequestIdRef.current = null;
     activeChallengeIdRef.current = null;
     isScanningRef.current = false;
     lastScannedChallengeRef.current = null;
-    pointerDownPosRef.current = null;
+    touchStartPosRef.current = null;
     isDraggingRef.current = false;
     longPressFiredRef.current = false;
-    lastTouchCenterRef.current = null;
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
@@ -334,7 +340,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         setPendingVoiceIntent(intent);
         setVoiceStatus("IDLE");
       } else {
-        // Auto-execute safe commands
         console.log("[JARVIS VOICE] Sending command (auto-exec)");
         socket.emit("voice:execute", {
           intentId: intent.id,
@@ -396,7 +401,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }
   }, [connectToHost]);
 
-  // Initialize Speech Recognition
+  // Speech Recognition
   useEffect(() => {
     if (typeof window !== "undefined") {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -437,7 +442,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
           } else if (event.error === "no-speech") {
             setVoiceErrorMsg("No speech detected. Please speak clearly.");
           } else {
-            setVoiceErrorMsg(`Voice recognition error: ${event.error}`);
+            setVoiceErrorMsg(`Voice error: ${event.error}`);
           }
           setTimeout(() => {
             if (voiceStatus === "ERROR") setVoiceStatus("IDLE");
@@ -583,44 +588,56 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }
   };
 
-  // ==========================================
-  // MATHEMATICAL COORDINATE PROJECTION LOGIC
-  // Accounts for aspect ratio, letterboxing, pillarboxing & object-fit: contain
-  // ==========================================
+  // =========================================================================
+  // MATHEMATICAL COORDINATE PROJECTION WITH PINCH ZOOM + PAN SUPPORT
+  // =========================================================================
   const calculateNormalizedCoords = (clientX: number, clientY: number): { normalizedX: number; normalizedY: number } | null => {
+    const viewport = viewportRef.current;
     const video = videoRef.current;
-    if (!video) return null;
+    if (!viewport || !video) return null;
 
-    const rect = video.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return null;
+    const viewportRect = viewport.getBoundingClientRect();
+    if (viewportRect.width === 0 || viewportRect.height === 0) return null;
 
+    // 1. Touch coordinate relative to viewport top-left
+    const touchX = clientX - viewportRect.left;
+    const touchY = clientY - viewportRect.top;
+
+    // 2. Un-transform for scale and pan (transform-origin: center center)
+    const centerX = viewportRect.width / 2;
+    const centerY = viewportRect.height / 2;
+
+    const localX = (touchX - centerX - panOffset.x) / screenScale + centerX;
+    const localY = (touchY - centerY - panOffset.y) / screenScale + centerY;
+
+    // 3. Aspect ratio / letterbox / pillarbox projection inside unzoomed viewport
     const videoWidth = video.videoWidth || 1920;
     const videoHeight = video.videoHeight || 1080;
 
-    const containerRatio = rect.width / rect.height;
+    const containerRatio = viewportRect.width / viewportRect.height;
     const videoRatio = videoWidth / videoHeight;
 
-    let renderedWidth = rect.width;
-    let renderedHeight = rect.height;
+    let renderedWidth = viewportRect.width;
+    let renderedHeight = viewportRect.height;
     let renderedLeft = 0;
     let renderedTop = 0;
 
     if (containerRatio > videoRatio) {
       // Pillarbox (black bars on left/right)
-      renderedHeight = rect.height;
-      renderedWidth = rect.height * videoRatio;
-      renderedLeft = (rect.width - renderedWidth) / 2;
+      renderedHeight = viewportRect.height;
+      renderedWidth = viewportRect.height * videoRatio;
+      renderedLeft = (viewportRect.width - renderedWidth) / 2;
       renderedTop = 0;
     } else {
       // Letterbox (black bars on top/bottom)
-      renderedWidth = rect.width;
-      renderedHeight = rect.width / videoRatio;
+      renderedWidth = viewportRect.width;
+      renderedHeight = viewportRect.width / videoRatio;
       renderedLeft = 0;
-      renderedTop = (rect.height - renderedHeight) / 2;
+      renderedTop = (viewportRect.height - renderedHeight) / 2;
     }
 
-    const offsetX = clientX - rect.left - renderedLeft;
-    const offsetY = clientY - rect.top - renderedTop;
+    const offsetX = localX - renderedLeft;
+    const offsetY = localY - renderedTop;
 
     const normalizedX = Math.max(0, Math.min(1, offsetX / renderedWidth));
     const normalizedY = Math.max(0, Math.min(1, offsetY / renderedHeight));
@@ -628,160 +645,207 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     return { normalizedX, normalizedY };
   };
 
-  // ==========================================
-  // TOUCH-TO-CONTROL EVENT HANDLERS
-  // ==========================================
-  const handlePointerDown = (e: React.PointerEvent<HTMLVideoElement>) => {
-    if (e.pointerType === "touch" && !e.isPrimary) return;
-    
+  // =========================================================================
+  // TOUCH GESTURE HANDLERS (TAP TO CLICK, PINCH TO ZOOM, PAN WHEN ZOOMED)
+  // =========================================================================
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (videoRef.current && videoRef.current.paused) {
       videoRef.current.play().catch(() => {});
     }
 
-    const coords = calculateNormalizedCoords(e.clientX, e.clientY);
-    if (!coords) return;
-
-    pointerDownPosRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
-    longPressFiredRef.current = false;
-    isDraggingRef.current = false;
-
-    setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: false });
-
-    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = setTimeout(() => {
-      longPressFiredRef.current = true;
-      if (navigator.vibrate) navigator.vibrate(50);
-      setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: true });
-
-      socketRef.current?.emit("control:mouse_click", {
-        normalizedX: coords.normalizedX,
-        normalizedY: coords.normalizedY,
-        button: "right",
-      });
-
-      setTimeout(() => {
-        setTouchIndicator((prev) => ({ ...prev, visible: false }));
-      }, 400);
-    }, 500);
-
-    if (isDragMode) {
-      isDraggingRef.current = true;
-      socketRef.current?.emit("control:mouse_button", {
-        action: "down",
-        normalizedX: coords.normalizedX,
-        normalizedY: coords.normalizedY,
-        button: "left",
-      });
-    }
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLVideoElement>) => {
-    if (!pointerDownPosRef.current) return;
-
-    const dx = Math.abs(e.clientX - pointerDownPosRef.current.x);
-    const dy = Math.abs(e.clientY - pointerDownPosRef.current.y);
-
-    if (dx > 10 || dy > 10) {
+    if (e.touches.length === 2) {
+      // 2-finger pinch gesture start
       if (longPressTimerRef.current) {
         clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = null;
       }
-    }
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      pinchStartDistRef.current = dist;
+      pinchStartScaleRef.current = screenScale;
+      hasMovedSignificantlyRef.current = true;
+    } else if (e.touches.length === 1) {
+      // 1-finger start
+      const touch = e.touches[0];
+      touchStartPosRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+      hasMovedSignificantlyRef.current = false;
+      longPressFiredRef.current = false;
+      isDraggingRef.current = false;
 
-    const coords = calculateNormalizedCoords(e.clientX, e.clientY);
-    if (!coords) return;
+      if (screenScale > 1) {
+        // Prepare for panning when zoomed
+        panStartRef.current = {
+          touchX: touch.clientX,
+          touchY: touch.clientY,
+          panX: panOffset.x,
+          panY: panOffset.y,
+        };
+      } else {
+        // Start long-press timer for Right Click (500ms) only when not zoomed
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = setTimeout(() => {
+          longPressFiredRef.current = true;
+          if (navigator.vibrate) navigator.vibrate(50);
+          setTouchIndicator({ x: touch.clientX, y: touch.clientY, visible: true, isRightClick: true });
 
-    if ((dx > 15 || dy > 15) && !isDraggingRef.current && !longPressFiredRef.current) {
-      isDraggingRef.current = true;
-      socketRef.current?.emit("control:mouse_button", {
-        action: "down",
-        normalizedX: coords.normalizedX,
-        normalizedY: coords.normalizedY,
-        button: "left",
-      });
-    }
+          const coords = calculateNormalizedCoords(touch.clientX, touch.clientY);
+          if (coords) {
+            socketRef.current?.emit("control:mouse_click", {
+              normalizedX: coords.normalizedX,
+              normalizedY: coords.normalizedY,
+              button: "right",
+            });
+          }
 
-    if (isDraggingRef.current) {
-      socketRef.current?.emit("control:mouse_move", {
-        normalizedX: coords.normalizedX,
-        normalizedY: coords.normalizedY,
-        isRelative: false,
-      });
-      setTouchIndicator({ x: e.clientX, y: e.clientY, visible: true, isRightClick: false });
+          setTimeout(() => {
+            setTouchIndicator((prev) => ({ ...prev, visible: false }));
+          }, 400);
+        }, 500);
+      }
     }
   };
 
-  const handlePointerUp = (e: React.PointerEvent<HTMLVideoElement>) => {
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 2 && pinchStartDistRef.current) {
+      // 2-finger Pinch Zooming
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const currentDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const factor = currentDist / pinchStartDistRef.current;
+      const newScale = Math.max(1, Math.min(4, Math.round(pinchStartScaleRef.current * factor * 20) / 20));
+      setScreenScale(newScale);
+
+      if (newScale === 1) {
+        setPanOffset({ x: 0, y: 0 });
+      }
+      hasMovedSignificantlyRef.current = true;
+    } else if (e.touches.length === 1 && touchStartPosRef.current) {
+      const touch = e.touches[0];
+      const dx = touch.clientX - touchStartPosRef.current.x;
+      const dy = touch.clientY - touchStartPosRef.current.y;
+
+      if (Math.hypot(dx, dy) > 8) {
+        hasMovedSignificantlyRef.current = true;
+        if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+          longPressTimerRef.current = null;
+        }
+      }
+
+      if (screenScale > 1 && panStartRef.current) {
+        // Panning when zoomed
+        const viewport = viewportRef.current;
+        const viewportW = viewport?.clientWidth || 360;
+        const viewportH = viewport?.clientHeight || 240;
+
+        const rawPanX = panStartRef.current.panX + (touch.clientX - panStartRef.current.touchX);
+        const rawPanY = panStartRef.current.panY + (touch.clientY - panStartRef.current.touchY);
+
+        // Clamp pan so content stays in bounds
+        const maxPanX = (viewportW * (screenScale - 1)) / 2;
+        const maxPanY = (viewportH * (screenScale - 1)) / 2;
+
+        const clampedPanX = Math.max(-maxPanX, Math.min(maxPanX, rawPanX));
+        const clampedPanY = Math.max(-maxPanY, Math.min(maxPanY, rawPanY));
+
+        setPanOffset({ x: clampedPanX, y: clampedPanY });
+      } else if (isDragMode && screenScale === 1 && hasMovedSignificantlyRef.current) {
+        // In Drag mode, move cursor
+        const coords = calculateNormalizedCoords(touch.clientX, touch.clientY);
+        if (coords) {
+          if (!isDraggingRef.current) {
+            isDraggingRef.current = true;
+            socketRef.current?.emit("control:mouse_button", {
+              action: "down",
+              normalizedX: coords.normalizedX,
+              normalizedY: coords.normalizedY,
+              button: "left",
+            });
+          }
+          socketRef.current?.emit("control:mouse_move", {
+            normalizedX: coords.normalizedX,
+            normalizedY: coords.normalizedY,
+            isRelative: false,
+          });
+        }
+      }
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
 
-    const coords = calculateNormalizedCoords(e.clientX, e.clientY);
+    if (e.touches.length < 2) {
+      pinchStartDistRef.current = null;
+    }
 
-    if (isDraggingRef.current) {
-      isDraggingRef.current = false;
-      if (coords) {
-        socketRef.current?.emit("control:mouse_button", {
-          action: "up",
-          normalizedX: coords.normalizedX,
-          normalizedY: coords.normalizedY,
-          button: "left",
-        });
+    if (e.touches.length === 0) {
+      const now = Date.now();
+
+      // Double-Tap to Toggle Zoom (1x <-> 2.5x)
+      if (now - lastTapTimeRef.current < 300 && !hasMovedSignificantlyRef.current && touchStartPosRef.current) {
+        if (screenScale > 1) {
+          setScreenScale(1);
+          setPanOffset({ x: 0, y: 0 });
+          showToast("Screen Zoom: 100%");
+        } else {
+          setScreenScale(2.5);
+          showToast("Screen Zoom: 250%");
+        }
+        lastTapTimeRef.current = 0;
+        touchStartPosRef.current = null;
+        return;
       }
-    } else if (!longPressFiredRef.current && pointerDownPosRef.current && coords) {
-      socketRef.current?.emit("control:mouse_click", {
-        normalizedX: coords.normalizedX,
-        normalizedY: coords.normalizedY,
-        button: "left",
-      });
-    }
+      lastTapTimeRef.current = now;
 
-    pointerDownPosRef.current = null;
-    setTimeout(() => {
-      setTouchIndicator((prev) => ({ ...prev, visible: false }));
-    }, 200);
-  };
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false;
+        const lastTouch = touchStartPosRef.current;
+        if (lastTouch) {
+          const coords = calculateNormalizedCoords(lastTouch.x, lastTouch.y);
+          if (coords) {
+            socketRef.current?.emit("control:mouse_button", {
+              action: "up",
+              normalizedX: coords.normalizedX,
+              normalizedY: coords.normalizedY,
+              button: "left",
+            });
+          }
+        }
+      } else if (!longPressFiredRef.current && !hasMovedSignificantlyRef.current && touchStartPosRef.current) {
+        // Genuine Tap -> Trigger real Windows click!
+        const tapX = touchStartPosRef.current.x;
+        const tapY = touchStartPosRef.current.y;
+        const coords = calculateNormalizedCoords(tapX, tapY);
 
-  // Two-Finger Gesture Scroll on Touch Devices
-  const handleTouchStart = (e: React.TouchEvent<HTMLVideoElement>) => {
-    if (e.touches.length === 2) {
-      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-      const touch1 = e.touches[0];
-      const touch2 = e.touches[1];
-      lastTouchCenterRef.current = {
-        x: (touch1.clientX + touch2.clientX) / 2,
-        y: (touch1.clientY + touch2.clientY) / 2,
-      };
-    }
-  };
+        if (coords) {
+          setTouchIndicator({ x: tapX, y: tapY, visible: true, isRightClick: false });
 
-  const handleTouchMove = (e: React.TouchEvent<HTMLVideoElement>) => {
-    if (e.touches.length === 2 && lastTouchCenterRef.current) {
-      const touch1 = e.touches[0];
-      const touch2 = e.touches[1];
-      const currentY = (touch1.clientY + touch2.clientY) / 2;
-      const deltaY = lastTouchCenterRef.current.y - currentY;
-      lastTouchCenterRef.current = {
-        x: (touch1.clientX + touch2.clientX) / 2,
-        y: currentY,
-      };
+          socketRef.current?.emit("control:mouse_click", {
+            normalizedX: coords.normalizedX,
+            normalizedY: coords.normalizedY,
+            button: "left",
+          });
 
-      if (Math.abs(deltaY) > 2) {
-        socketRef.current?.emit("control:mouse_scroll", { deltaX: 0, deltaY });
+          setTimeout(() => {
+            setTouchIndicator((prev) => ({ ...prev, visible: false }));
+          }, 250);
+        }
       }
-    }
-  };
 
-  const handleTouchEnd = () => {
-    lastTouchCenterRef.current = null;
+      touchStartPosRef.current = null;
+      panStartRef.current = null;
+    }
   };
 
   // Keyboard Helpers
   const sendKey = (key: string) => {
     if (navigator.vibrate) navigator.vibrate(10);
 
-    // Toggle modifiers
     if (key === "Ctrl") {
       setModifiers((prev) => ({ ...prev, ctrl: !prev.ctrl }));
       return;
@@ -816,7 +880,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       modifiers: effectiveModifiers,
     });
 
-    // Auto-release non-caps modifiers after keypress
     if (modifiers.shift || modifiers.ctrl || modifiers.alt || modifiers.win) {
       setModifiers((prev) => ({ ...prev, shift: false, ctrl: false, alt: false, win: false }));
     }
@@ -990,7 +1053,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     );
   }
 
-  // Determine uppercase state
   const isShifted = modifiers.shift || modifiers.caps;
 
   // ==========================================
@@ -1000,106 +1062,204 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     <div className="h-[100dvh] max-h-[100dvh] w-full bg-[#070a13] text-[#f0f6fc] flex flex-col select-none overflow-hidden touch-none fixed inset-0">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 rounded-full bg-cyan-950/90 text-cyan-300 text-xs border border-cyan-500/50 shadow-lg backdrop-blur-md animate-fade-in pointer-events-none">
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 rounded-full bg-cyan-950/95 text-cyan-300 text-xs border border-cyan-500/50 shadow-2xl backdrop-blur-md animate-fade-in pointer-events-none">
           {toastMessage}
         </div>
       )}
 
-      {/* Top Header Bar */}
-      <header className="h-11 flex-shrink-0 px-3 bg-[#0e1526] border-b border-cyan-500/20 flex items-center justify-between z-30">
-        <div className="flex items-center gap-2">
-          <span className={`w-2.5 h-2.5 rounded-full ${streamStatus === "STREAMING_LIVE" ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
-          <div>
-            <h1 className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
-              <span>JARVIS</span>
-              <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-500/30">
-                {streamStatus === "STREAMING_LIVE" ? "LIVE" : streamStatus.replace(/_/g, " ")}
-              </span>
-            </h1>
-          </div>
+      {/* ======================================================== */}
+      {/* 1. FIXED MOBILE-OPTIMIZED TOP NAVBAR (HIGH Z-INDEX)       */}
+      {/* ======================================================== */}
+      <header 
+        className="h-11 flex-shrink-0 px-3 bg-[#0e1526] border-b border-cyan-500/20 flex items-center justify-between z-40 relative select-none"
+        style={{
+          paddingTop: "max(env(safe-area-inset-top, 0px), 0px)",
+        }}
+      >
+        {/* Left: Branding & Status Dot */}
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <span className={`w-2 h-2 rounded-full ${streamStatus === "STREAMING_LIVE" ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
+          <h1 className="text-xs font-bold text-slate-100 flex items-center gap-1">
+            <span className="bg-gradient-to-r from-cyan-400 to-teal-300 bg-clip-text text-transparent font-extrabold">JARVIS</span>
+            <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-950 text-cyan-400 border border-cyan-500/30 font-mono">
+              {streamStatus === "STREAMING_LIVE" ? "LIVE" : streamStatus.slice(0, 4)}
+            </span>
+          </h1>
         </div>
 
-        <div className="flex items-center gap-1.5">
-          {/* Zoom Controls */}
-          <div className="flex items-center bg-slate-900 rounded-lg border border-slate-700/80 p-0.5">
+        {/* Center: Zoom Level Indicator */}
+        <div className="flex items-center gap-1">
+          {screenScale > 1 && (
             <button
-              onClick={() => handleZoom(-1)}
-              className="p-1 rounded text-slate-400 hover:text-cyan-300 active:bg-slate-800"
-              title="Zoom Out"
+              onClick={resetScreenZoom}
+              className="px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-500/40 text-[9px] font-mono font-bold flex items-center gap-0.5 animate-pulse"
+              title="Reset Screen Zoom"
             >
-              <ZoomOut className="w-3.5 h-3.5" />
+              <span>{Math.round(screenScale * 100)}%</span>
+              <RotateCcw className="w-2.5 h-2.5" />
             </button>
-            <button
-              onClick={resetZoom}
-              className="px-1.5 text-[10px] font-mono text-cyan-300 font-semibold"
-              title="Reset Zoom to 100%"
-            >
-              {zoomLevel}%
-            </button>
-            <button
-              onClick={() => handleZoom(1)}
-              className="p-1 rounded text-slate-400 hover:text-cyan-300 active:bg-slate-800"
-              title="Zoom In"
-            >
-              <ZoomIn className="w-3.5 h-3.5" />
-            </button>
-          </div>
+          )}
+        </div>
 
-          {/* Drag Mode Toggle */}
+        {/* Right: Responsive Actions & Mobile Menu Drawer */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {/* Quick Drag / Tap toggle */}
           <button
             onClick={() => setIsDragMode((prev) => !prev)}
-            className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-all flex items-center gap-1 ${
+            className={`px-1.5 py-1 rounded text-[10px] font-semibold border transition-all flex items-center gap-1 ${
               isDragMode 
                 ? "bg-amber-500/20 text-amber-300 border-amber-500/50 glow-amber" 
                 : "bg-slate-800 text-slate-300 border-slate-700"
             }`}
-            title="Toggle Drag/Select Mode"
+            title="Toggle Drag/Tap Mode"
           >
             <Move className="w-3 h-3" />
             <span>{isDragMode ? "Drag" : "Tap"}</span>
           </button>
 
-          {/* Reconnect WebRTC Stream */}
-          <button
-            onClick={() => {
-              if (socketRef.current) initWebRTCViewer(socketRef.current);
-            }}
-            className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700 text-xs"
-            title="Refresh Stream"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-          </button>
+          {/* Desktop-only action buttons */}
+          <div className="hidden md:flex items-center gap-1">
+            {/* Zoom Controls */}
+            <button
+              onClick={() => handleZoomChange(-0.25)}
+              className="p-1 rounded bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700"
+              title="Zoom Out Screen"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleZoomChange(0.25)}
+              className="p-1 rounded bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700"
+              title="Zoom In Screen"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
 
-          {/* Bengali / English Language Toggle */}
-          <button
-            onClick={() => setVoiceLang((prev) => (prev === "en-US" ? "bn-BD" : "en-US"))}
-            className="px-2 py-1 rounded-lg bg-slate-800 text-[10px] font-medium text-cyan-300 border border-cyan-500/20 flex items-center gap-0.5"
-          >
-            <Globe className="w-3 h-3" />
-            <span>{voiceLang === "en-US" ? "EN" : "বাং"}</span>
-          </button>
+            {/* Language */}
+            <button
+              onClick={() => setVoiceLang((prev) => (prev === "en-US" ? "bn-BD" : "en-US"))}
+              className="px-1.5 py-1 rounded bg-slate-800 text-[10px] font-medium text-cyan-300 border border-cyan-500/20"
+            >
+              {voiceLang === "en-US" ? "EN" : "বাং"}
+            </button>
 
-          {/* Disconnect */}
+            {/* Refresh */}
+            <button
+              onClick={() => {
+                if (socketRef.current) initWebRTCViewer(socketRef.current);
+              }}
+              className="p-1 rounded bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700"
+              title="Refresh Stream"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Disconnect */}
+            <button
+              onClick={handleDisconnect}
+              className="p-1 rounded bg-red-950/60 text-red-400 hover:bg-red-900 border border-red-500/30"
+              title="Disconnect"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Mobile Menu Dropdown Toggle */}
           <button
-            onClick={handleDisconnect}
-            className="p-1.5 rounded-lg bg-red-950/60 text-red-400 hover:bg-red-900 border border-red-500/30 text-xs"
-            title="Disconnect"
+            onClick={() => setIsMobileMenuOpen((prev) => !prev)}
+            className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-700 flex md:hidden items-center justify-center"
+            title="More Options"
           >
-            <LogOut className="w-3.5 h-3.5" />
+            <MoreVertical className="w-3.5 h-3.5" />
           </button>
         </div>
+
+        {/* Mobile Dropdown Menu Drawer */}
+        {isMobileMenuOpen && (
+          <div className="absolute top-11 right-2 w-48 p-2 rounded-xl bg-[#0e1526]/98 border border-cyan-500/30 backdrop-blur-xl shadow-2xl z-50 flex flex-col gap-1.5 animate-in fade-in slide-in-from-top-2">
+            <div className="text-[10px] font-bold text-slate-400 px-2 py-1 border-b border-slate-800 flex items-center justify-between">
+              <span>Quick Controls</span>
+              <button onClick={() => setIsMobileMenuOpen(false)} className="text-slate-500 hover:text-white">
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+
+            {/* Zoom Screen */}
+            <div className="flex items-center justify-between px-2 py-1 bg-slate-900/80 rounded-lg text-xs">
+              <span className="text-slate-300 text-[11px]">Zoom Screen</span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => handleZoomChange(-0.25)}
+                  className="p-1 rounded bg-slate-800 text-slate-300 active:bg-slate-700"
+                >
+                  <ZoomOut className="w-3 h-3" />
+                </button>
+                <span className="text-[10px] font-mono font-bold text-cyan-300">{Math.round(screenScale * 100)}%</span>
+                <button
+                  onClick={() => handleZoomChange(0.25)}
+                  className="p-1 rounded bg-slate-800 text-slate-300 active:bg-slate-700"
+                >
+                  <ZoomIn className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {/* Language Toggle */}
+            <button
+              onClick={() => {
+                setVoiceLang((prev) => (prev === "en-US" ? "bn-BD" : "en-US"));
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full px-2 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-xs text-slate-200 flex items-center justify-between text-left"
+            >
+              <span>Voice Language</span>
+              <span className="text-cyan-400 font-bold text-[10px]">{voiceLang === "en-US" ? "English" : "বাংলা"}</span>
+            </button>
+
+            {/* Reconnect WebRTC */}
+            <button
+              onClick={() => {
+                if (socketRef.current) initWebRTCViewer(socketRef.current);
+                setIsMobileMenuOpen(false);
+                showToast("Refreshing WebRTC stream...");
+              }}
+              className="w-full px-2 py-1.5 rounded-lg bg-slate-900/80 hover:bg-slate-800 text-xs text-slate-200 flex items-center gap-2 text-left"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Refresh Stream</span>
+            </button>
+
+            {/* Disconnect */}
+            <button
+              onClick={() => {
+                setIsMobileMenuOpen(false);
+                handleDisconnect();
+              }}
+              className="w-full px-2 py-1.5 rounded-lg bg-red-950/60 hover:bg-red-900 text-xs text-red-300 flex items-center gap-2 text-left border border-red-500/20 mt-1"
+            >
+              <LogOut className="w-3.5 h-3.5 text-red-400" />
+              <span>Disconnect</span>
+            </button>
+          </div>
+        )}
       </header>
 
-      {/* Main Workspace Area (No Document Scrolling) */}
+      {/* ======================================================== */}
+      {/* 2. MAIN WORKSPACE (NO SCROLLING, SCREEN AT TOP)          */}
+      {/* ======================================================== */}
       <main className="flex-1 flex flex-col overflow-hidden relative min-h-0 bg-[#070a13]">
         {/* ======================================================== */}
-        {/* TAB 1: REMOTE SCREEN AT TOP + KEYBOARD/CONTROLS BELOW     */}
+        {/* TAB 1: REMOTE SCREEN AT TOP + FULL KEYBOARD BELOW         */}
         {/* ======================================================== */}
         {activeTab === "screen" && (
           <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            {/* Top Section: Remote Laptop Screen */}
+            {/* Top Section: Remote Laptop Screen Viewport (Supports Pinch Zoom & Pan) */}
             <div 
-              className="w-full bg-black relative flex items-center justify-center overflow-hidden flex-shrink-0"
+              ref={viewportRef}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              className="w-full bg-black relative flex items-center justify-center overflow-hidden flex-shrink-0 select-none touch-none cursor-crosshair"
               style={{
                 height: "40vh",
                 maxHeight: "42vh",
@@ -1133,11 +1293,18 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                 </div>
               )}
 
-              {/* Live Interactive Video Surface */}
+              {/* Floating Zoom & Pan Indicator Badge */}
+              {screenScale > 1 && (
+                <div className="absolute top-2 left-2 z-20 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/80 backdrop-blur-md border border-cyan-500/40 text-[9px] font-mono text-cyan-300 shadow-lg pointer-events-none">
+                  <span>Pinch / Pan Active ({Math.round(screenScale * 100)}%)</span>
+                </div>
+              )}
+
+              {/* Live Interactive Video Surface (Pinch Zoomed & Panned) */}
               <div 
-                className="w-full h-full flex items-center justify-center transition-transform duration-100"
+                className="w-full h-full flex items-center justify-center pointer-events-none transition-transform duration-75"
                 style={{
-                  transform: zoomLevel !== 100 ? `scale(${zoomLevel / 100})` : undefined,
+                  transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${screenScale})`,
                   transformOrigin: "center center",
                 }}
               >
@@ -1146,13 +1313,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                   autoPlay
                   playsInline
                   muted
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
-                  onTouchStart={handleTouchStart}
-                  onTouchMove={handleTouchMove}
-                  onTouchEnd={handleTouchEnd}
-                  className="w-full h-full object-contain cursor-crosshair touch-none select-none"
+                  className="w-full h-full object-contain pointer-events-none select-none"
                 />
               </div>
             </div>
@@ -1197,7 +1358,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                 </button>
               </div>
 
-              {/* Realistic Full Virtual Keyboard (Grid of Keys) */}
+              {/* Realistic Full Virtual Keyboard */}
               <div className="flex-1 flex flex-col gap-1 select-none overflow-y-auto min-h-0">
                 {/* Row 1: Esc, Function Keys, Delete */}
                 <div className="flex gap-0.5 w-full">
@@ -1412,7 +1573,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
 
               {/* Gesture Hint Bar */}
               <div className="flex items-center justify-between text-[9px] font-mono text-slate-400 px-1 pt-0.5 border-t border-slate-800 flex-shrink-0">
-                <span>Tap: Click • Hold: Right Click • 2-Finger: Scroll</span>
+                <span>Pinch/Double-Tap: Zoom • Drag: Pan • Tap: Click</span>
                 <span className="text-cyan-400">{isDragMode ? "● DRAG ON" : "○ TAP MODE"}</span>
               </div>
             </div>
@@ -1581,7 +1742,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                 <p><span className="text-slate-500">Session Token:</span> {authToken.slice(0, 16)}...</p>
                 <p><span className="text-slate-500">Transport:</span> Encrypted WebSockets & WebRTC</p>
                 <p><span className="text-slate-500">Stream Status:</span> {streamStatus}</p>
-                <p><span className="text-slate-500">Zoom Level:</span> {zoomLevel}%</p>
               </div>
             </div>
 
@@ -1597,10 +1757,10 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       </main>
 
       {/* ======================================================== */}
-      {/* FIXED FOOTER NAVIGATION (ALWAYS VISIBLE, NO SCROLL)      */}
+      {/* 3. FIXED FOOTER NAVIGATION (HIGH Z-INDEX, NO SCROLL)     */}
       {/* ======================================================== */}
       <nav 
-        className="h-14 bg-[#0E1526] border-t border-cyan-500/20 grid grid-cols-3 items-center px-4 z-30 flex-shrink-0"
+        className="h-14 bg-[#0E1526] border-t border-cyan-500/20 grid grid-cols-3 items-center px-4 z-40 flex-shrink-0"
         style={{
           paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0px)",
         }}
