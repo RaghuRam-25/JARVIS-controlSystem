@@ -65,16 +65,17 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
   const webrtcStreamerRef = useRef<WebRTCStreamer | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  const hostAuthHeaders = (): Record<string, string> =>
-    hostCredential ? { "X-Jarvis-Host-Credential": hostCredential } : {};
+  const hostAuthHeaders = (cred?: string | null): Record<string, string> => {
+    const key = cred !== undefined ? cred : hostCredential;
+    return key ? { "X-Jarvis-Host-Credential": key } : {};
+  };
 
   // Initialize socket and fetch data
   useEffect(() => {
     const apiBase = getApiBaseUrl();
     setServerUrl(apiBase);
 
-    // The host role requires a credential the Agent only releases to loopback
-    // callers. Without it the socket connects as an unauthenticated client.
+    // The host role requires a credential from the Agent.
     fetchHostCredential(apiBase).then((credential) => {
       setHostCredential(credential);
 
@@ -95,7 +96,7 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
       });
 
       socket.on("pairing:approved", () => {
-        fetchSessions(apiBase);
+        fetchSessions(apiBase, credential);
         fetchChallenge(apiBase);
       });
 
@@ -104,15 +105,15 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
       });
 
       socket.on("session:revoked", () => {
-        fetchSessions(apiBase);
+        fetchSessions(apiBase, credential);
       });
 
       socket.on("session:revoked_all", () => {
         setActiveSessions([]);
       });
 
-      fetchSessions(apiBase);
-      fetchSystemStatus(apiBase);
+      fetchSessions(apiBase, credential);
+      fetchSystemStatus(apiBase, credential);
     });
 
     fetchChallenge(apiBase);
@@ -154,10 +155,10 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
     }
   };
 
-  const fetchSessions = async (apiBase = serverUrl) => {
+  const fetchSessions = async (apiBase = serverUrl, cred = hostCredential) => {
     try {
       const res = await fetch(apiUrl(API_ENDPOINTS.pairingSessions, apiBase), {
-        headers: hostAuthHeaders(),
+        headers: hostAuthHeaders(cred),
       });
       const data = await res.json();
       if (data.success) {
@@ -166,10 +167,10 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
     } catch {}
   };
 
-  const fetchSystemStatus = async (apiBase = serverUrl) => {
+  const fetchSystemStatus = async (apiBase = serverUrl, cred = hostCredential) => {
     try {
       const res = await fetch(apiUrl(API_ENDPOINTS.systemStatus, apiBase), {
-        headers: hostAuthHeaders(),
+        headers: hostAuthHeaders(cred),
       });
       const data = await res.json();
       if (data.success) {

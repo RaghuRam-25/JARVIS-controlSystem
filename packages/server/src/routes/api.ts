@@ -251,12 +251,16 @@ apiRouter.post("/api/voice/intent", requireSession, async (req: Request, res: Re
   return res.json({ success: result.success, intent, result });
 });
 
-// Releases the Host credential to the local Host Deck UI.
-// Restricted to loopback callers: the host UI always runs on the Host machine
-// (Electron shell or local dev), so a remote client can never bootstrap the
-// privileged host role over the network.
+// Releases the Host credential to the Host Deck UI.
+// Allowed for loopback callers (local desktop/dev) and cloud deployments
+// (when PUBLIC_SERVER_URL or ALLOW_REMOTE_HOST is set).
 apiRouter.get("/api/host/credential", (req: Request, res: Response) => {
-  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+  const forwarded = req.headers["x-forwarded-for"];
+  const clientIp = typeof forwarded === "string" ? forwarded.split(",")[0].trim() : req.socket.remoteAddress;
+  const isLoopback = isLoopbackAddress(clientIp) || isLoopbackAddress(req.socket.remoteAddress);
+  const isCloudOrAllowed = Boolean(CONFIG.PUBLIC_SERVER_URL) || process.env.ALLOW_REMOTE_HOST === "true";
+
+  if (!isLoopback && !isCloudOrAllowed) {
     return res.status(403).json({ success: false, message: "Host credential is only available locally." });
   }
   res.json({ success: true, hostCredential: getHostCredential() });
