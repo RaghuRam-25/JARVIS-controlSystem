@@ -153,6 +153,24 @@ function createWindow() {
   });
 }
 
+/**
+ * Fetches the Host credential from the local Host Agent.
+ * The endpoint only answers loopback callers, which the Electron shell always is.
+ */
+async function fetchHostCredential(): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/host/credential`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.hostCredential === "string" ? data.hostCredential : null;
+  } catch {
+    return null;
+  }
+}
+
 // IPC Handlers
 ipcMain.handle("host:get_info", () => {
   return {
@@ -182,9 +200,13 @@ ipcMain.handle("host:get_screen_sources", async () => {
 ipcMain.handle("host:emergency_revoke_all", async () => {
   // Forward emergency kill to server via HTTP
   try {
+    const hostCredential = await fetchHostCredential();
     const res = await fetch(`${API_BASE_URL}/api/pairing/revoke-all`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(hostCredential ? { "X-Jarvis-Host-Credential": hostCredential } : {}),
+      },
     });
     return { success: res.ok };
   } catch {

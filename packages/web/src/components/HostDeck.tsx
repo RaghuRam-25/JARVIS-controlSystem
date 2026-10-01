@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { getSocket } from "../lib/socket";
 import { WebRTCStreamer } from "../lib/webrtc";
-import { API_ENDPOINTS, API_PORT, apiUrl, getApiBaseUrl } from "../lib/env";
+import { API_ENDPOINTS, API_PORT, apiUrl, fetchHostCredential, getApiBaseUrl } from "../lib/env";
 
 interface PendingRequest {
   requestId: string;
@@ -59,48 +59,63 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [isScreenStreaming, setIsScreenStreaming] = useState<boolean>(false);
   const [serverUrl, setServerUrl] = useState<string>(getApiBaseUrl());
+  const [hostCredential, setHostCredential] = useState<string | null>(null);
 
   const socketRef = useRef<any>(null);
   const webrtcStreamerRef = useRef<WebRTCStreamer | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  const hostAuthHeaders = (): Record<string, string> =>
+    hostCredential ? { "X-Jarvis-Host-Credential": hostCredential } : {};
 
   // Initialize socket and fetch data
   useEffect(() => {
     const apiBase = getApiBaseUrl();
     setServerUrl(apiBase);
 
-    const socket = getSocket(apiBase, { isHost: true });
-    socketRef.current = socket;
-    webrtcStreamerRef.current = new WebRTCStreamer(socket);
+    // The host role requires a credential the Agent only releases to loopback
+    // callers. Without it the socket connects as an unauthenticated client.
+    fetchHostCredential(apiBase).then((credential) => {
+      setHostCredential(credential);
 
-    socket.on("connect", () => {
-      console.log("Host connected to control socket:", socket.id);
-    });
+      const socket = getSocket(apiBase, { isHost: true, hostCredential: credential || undefined });
+      socketRef.current = socket;
+      webrtcStreamerRef.current = new WebRTCStreamer(socket);
 
-    socket.on("pairing:requested", (req: PendingRequest) => {
-      setPendingRequests((prev) => [...prev.filter((p) => p.requestId !== req.requestId), req]);
-    });
+      socket.on("connect", () => {
+        console.log("Host connected to control socket:", socket.id);
+      });
 
-    socket.on("pairing:approved", () => {
+      socket.on("auth:error", ({ message }: { message: string }) => {
+        console.error("Host socket rejected:", message);
+      });
+
+      socket.on("pairing:requested", (req: PendingRequest) => {
+        setPendingRequests((prev) => [...prev.filter((p) => p.requestId !== req.requestId), req]);
+      });
+
+      socket.on("pairing:approved", () => {
+        fetchSessions(apiBase);
+        fetchChallenge(apiBase);
+      });
+
+      socket.on("pairing:rejected", ({ requestId }: { requestId: string }) => {
+        setPendingRequests((prev) => prev.filter((p) => p.requestId !== requestId));
+      });
+
+      socket.on("session:revoked", () => {
+        fetchSessions(apiBase);
+      });
+
+      socket.on("session:revoked_all", () => {
+        setActiveSessions([]);
+      });
+
       fetchSessions(apiBase);
-      fetchChallenge(apiBase);
-    });
-
-    socket.on("pairing:rejected", ({ requestId }: { requestId: string }) => {
-      setPendingRequests((prev) => prev.filter((p) => p.requestId !== requestId));
-    });
-
-    socket.on("session:revoked", () => {
-      fetchSessions(apiBase);
-    });
-
-    socket.on("session:revoked_all", () => {
-      setActiveSessions([]);
+      fetchSystemStatus(apiBase);
     });
 
     fetchChallenge(apiBase);
-    fetchSessions(apiBase);
-    fetchSystemStatus(apiBase);
 
     // Refresh system status every 10 seconds
     const statusInterval = setInterval(() => fetchSystemStatus(apiBase), 10000);
@@ -109,6 +124,7 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
       clearInterval(statusInterval);
       webrtcStreamerRef.current?.stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 60-second QR Countdown timer
@@ -140,7 +156,9 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
 
   const fetchSessions = async (apiBase = serverUrl) => {
     try {
-      const res = await fetch(apiUrl(API_ENDPOINTS.pairingSessions, apiBase));
+      const res = await fetch(apiUrl(API_ENDPOINTS.pairingSessions, apiBase), {
+        headers: hostAuthHeaders(),
+      });
       const data = await res.json();
       if (data.success) {
         setActiveSessions(data.sessions || []);
@@ -150,7 +168,9 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
 
   const fetchSystemStatus = async (apiBase = serverUrl) => {
     try {
-      const res = await fetch(apiUrl(API_ENDPOINTS.systemStatus, apiBase));
+      const res = await fetch(apiUrl(API_ENDPOINTS.systemStatus, apiBase), {
+        headers: hostAuthHeaders(),
+      });
       const data = await res.json();
       if (data.success) {
         setSystemStatus(data);
@@ -160,9 +180,9 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
 
   const handleDecision = async (requestId: string, decision: "approve" | "reject") => {
     try {
-      await fetch(apiUrl(API_ENDPOINTS.pairingDecision), {
+      await fetch(apiUrl(API_ENDPOINTS.pairingDecision, serverUrl), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...hostAuthHeaders() },
         body: JSON.stringify({ requestId, decision }),
       });
       setPendingRequests((prev) => prev.filter((p) => p.requestId !== requestId));
@@ -174,9 +194,9 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
 
   const handleRevokeSession = async (sessionId: string) => {
     try {
-      await fetch(apiUrl(API_ENDPOINTS.pairingRevoke), {
+      await fetch(apiUrl(API_ENDPOINTS.pairingRevoke, serverUrl), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...hostAuthHeaders() },
         body: JSON.stringify({ sessionId, reason: "Revoked by Host PC" }),
       });
       fetchSessions();
@@ -188,7 +208,10 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
   const handleEmergencyRevokeAll = async () => {
     if (confirm("EMERGENCY KILL SWITCH: Revoke all active paired controllers immediately?")) {
       try {
-        await fetch(apiUrl(API_ENDPOINTS.pairingRevokeAll), { method: "POST" });
+        await fetch(apiUrl(API_ENDPOINTS.pairingRevokeAll, serverUrl), {
+          method: "POST",
+          headers: hostAuthHeaders(),
+        });
         setActiveSessions([]);
       } catch (err) {
         console.error("Kill switch failed:", err);

@@ -9,6 +9,8 @@
     "start": "node dist/server.js",
     "test": "node --test dist/**/*.test.js",
     "test:security": "tsx src/tests/security.test.ts",
+    "test:hardening": "tsx src/tests/hardening.test.ts",
+    "test:http": "tsx src/tests/http.integration.test.ts",
     "test:e2e": "tsx src/tests/e2e.test.ts"
   },
   "dependencies": {

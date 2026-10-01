@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import QRCode from "qrcode";
 import os from "os";
 import { 
@@ -11,9 +11,63 @@ import { inputAutomation } from "../services/inputAutomation.js";
 import { voiceEngine } from "../services/voiceEngine.js";
 import { automationExecutor } from "../services/automationExecutor.js";
 import { getLocalIpAddresses, getPrimaryLocalIp } from "../services/lan.js";
+import { getHostCredential, isLoopbackAddress, verifyHostCredential } from "../services/hostAuth.js";
 import { CONFIG } from "../config.js";
 
 export const apiRouter = Router();
+
+function extractBearerToken(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  if (typeof header === "string" && header.toLowerCase().startsWith("bearer ")) {
+    return header.slice(7).trim();
+  }
+  const alt = req.headers["x-jarvis-token"];
+  return typeof alt === "string" ? alt.trim() : undefined;
+}
+
+function extractHostCredential(req: Request): unknown {
+  const header = req.headers["x-jarvis-host-credential"];
+  if (typeof header === "string" && header.trim()) return header.trim();
+  return req.query?.hostCredential;
+}
+
+/** Requires a valid Host credential. Used for host-only administration. */
+function requireHost(req: Request, res: Response, next: NextFunction) {
+  if (!verifyHostCredential(extractHostCredential(req))) {
+    res.status(401).json({ success: false, message: "Host credential required." });
+    return;
+  }
+  next();
+}
+
+/** Requires a valid paired controller session token. */
+function requireSession(req: Request, res: Response, next: NextFunction) {
+  pairingManager
+    .validateToken(extractBearerToken(req))
+    .then((session) => {
+      if (!session) {
+        res.status(401).json({ success: false, message: "Authentication required." });
+        return;
+      }
+      res.locals.session = session;
+      next();
+    })
+    .catch(() => {
+      res.status(500).json({ success: false, message: "Authentication check failed." });
+    });
+}
+
+/**
+ * Accepts either the Host credential or a paired controller token.
+ * Used by read-only endpoints that both the Host UI and controllers consume.
+ */
+function requireHostOrSession(req: Request, res: Response, next: NextFunction) {
+  if (verifyHostCredential(extractHostCredential(req))) {
+    next();
+    return;
+  }
+  requireSession(req, res, next);
+}
 
 // Health Check
 apiRouter.get("/health", (req: Request, res: Response) => {
@@ -76,26 +130,40 @@ apiRouter.post("/api/pairing/request", async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, errors: parsed.error.errors });
   }
 
-  const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "unknown";
-  const result = await pairingManager.requestPairing(parsed.data, clientIp);
+  // Only the left-most entry of X-Forwarded-For is meaningful, and it is only
+  // trustworthy when the deployment actually terminates a proxy. The socket
+  // address is used otherwise so rate limiting cannot be bypassed by spoofing.
+  const forwarded = req.headers["x-forwarded-for"];
+  const clientIp =
+    typeof forwarded === "string" && forwarded.length > 0
+      ? forwarded.split(",")[0].trim()
+      : req.socket.remoteAddress || "unknown";
 
-  if (result.status === "rate_limited") {
-    return res.status(429).json({ success: false, message: result.message });
-  }
-  if (result.status === "expired" || result.status === "rejected") {
-    return res.status(400).json({ success: false, message: result.message });
+  // requestPairing resolves only once the Host decides. Awaiting it here would
+  // hold the HTTP connection open for up to 45s; the decision is delivered to
+  // the controller over its socket, so this responds immediately.
+  const { immediate, requestId, pending } = pairingManager.submitPairing(parsed.data, clientIp);
+  pending?.catch(() => {
+    /* the decision is delivered over the controller socket */
+  });
+
+  if (immediate) {
+    if (immediate.status === "rate_limited") {
+      return res.status(429).json({ success: false, message: immediate.message });
+    }
+    return res.status(400).json({ success: false, message: immediate.message });
   }
 
   res.json({
     success: true,
     status: "pending_approval",
-    requestId: result.requestId,
+    requestId,
     message: "Pairing request sent. Waiting for host approval on Windows PC...",
   });
 });
 
 // Host approves/rejects pending pairing request
-apiRouter.post("/api/pairing/decision", async (req: Request, res: Response) => {
+apiRouter.post("/api/pairing/decision", requireHost, async (req: Request, res: Response) => {
   const parsed = HostApprovalDecisionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, errors: parsed.error.errors });
@@ -106,23 +174,23 @@ apiRouter.post("/api/pairing/decision", async (req: Request, res: Response) => {
 });
 
 // Get pending pairing requests (for Host UI)
-apiRouter.get("/api/pairing/pending", (req: Request, res: Response) => {
+apiRouter.get("/api/pairing/pending", requireHost, (req: Request, res: Response) => {
   res.json({
     success: true,
     pending: pairingManager.getPendingApprovals(),
   });
 });
 
-// Get active paired sessions
-apiRouter.get("/api/pairing/sessions", (req: Request, res: Response) => {
+// Get active paired sessions (tokens are stripped before leaving the process)
+apiRouter.get("/api/pairing/sessions", requireHost, (req: Request, res: Response) => {
   res.json({
     success: true,
-    sessions: pairingManager.getActiveSessions(),
+    sessions: pairingManager.getActiveSessions().map(({ token, ...rest }) => rest),
   });
 });
 
 // Revoke a session
-apiRouter.post("/api/pairing/revoke", (req: Request, res: Response) => {
+apiRouter.post("/api/pairing/revoke", requireHost, (req: Request, res: Response) => {
   const parsed = RevokeSessionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, errors: parsed.error.errors });
@@ -133,13 +201,13 @@ apiRouter.post("/api/pairing/revoke", (req: Request, res: Response) => {
 });
 
 // Emergency Revoke All
-apiRouter.post("/api/pairing/revoke-all", (req: Request, res: Response) => {
+apiRouter.post("/api/pairing/revoke-all", requireHost, (req: Request, res: Response) => {
   pairingManager.revokeAllSessions("Emergency Kill Switch Activated");
   res.json({ success: true, message: "All sessions revoked." });
 });
 
 // System Status & Screen Metrics
-apiRouter.get("/api/system/status", (req: Request, res: Response) => {
+apiRouter.get("/api/system/status", requireHostOrSession, (req: Request, res: Response) => {
   const metrics = inputAutomation.getMetrics();
   res.json({
     success: true,
@@ -154,32 +222,40 @@ apiRouter.get("/api/system/status", (req: Request, res: Response) => {
 });
 
 // Voice Intent Parsing & Execution via REST
-apiRouter.post("/api/voice/intent", async (req: Request, res: Response) => {
-  const { transcript, language, execute, authToken } = req.body;
-  if (!transcript) {
+apiRouter.post("/api/voice/intent", requireSession, async (req: Request, res: Response) => {
+  const { transcript, language, execute, approved } = req.body;
+  if (!transcript || typeof transcript !== "string") {
     return res.status(400).json({ success: false, message: "Transcript text is required." });
   }
 
   const intent = voiceEngine.parseTranscript(transcript, language || "auto");
 
-  if (execute) {
-    const session = await pairingManager.validateToken(authToken);
-    if (!session) {
-      return res.status(401).json({ success: false, message: "Authentication required to execute actions." });
-    }
-
-    if (intent.requiresExplicitApproval && !req.body.approved) {
-      return res.json({
-        success: false,
-        requiresApproval: true,
-        intent,
-        message: "This sensitive command requires explicit user confirmation before running.",
-      });
-    }
-
-    const result = await automationExecutor.executeIntent(intent);
-    return res.json({ success: result.success, intent, result });
+  if (!execute) {
+    return res.json({ success: true, intent });
   }
 
-  res.json({ success: true, intent });
+  // Approval is a server-side decision derived from the parsed risk level, not
+  // a flag the client can simply set to true.
+  if (intent.requiresExplicitApproval && approved !== true) {
+    return res.json({
+      success: false,
+      requiresApproval: true,
+      intent,
+      message: "This sensitive command requires explicit user confirmation before running.",
+    });
+  }
+
+  const result = await automationExecutor.executeIntent(intent);
+  return res.json({ success: result.success, intent, result });
+});
+
+// Releases the Host credential to the local Host Deck UI.
+// Restricted to loopback callers: the host UI always runs on the Host machine
+// (Electron shell or local dev), so a remote client can never bootstrap the
+// privileged host role over the network.
+apiRouter.get("/api/host/credential", (req: Request, res: Response) => {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    return res.status(403).json({ success: false, message: "Host credential is only available locally." });
+  }
+  res.json({ success: true, hostCredential: getHostCredential() });
 });

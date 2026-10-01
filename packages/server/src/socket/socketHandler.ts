@@ -1,8 +1,8 @@
 import { Server as SocketIOServer, Socket } from "socket.io";
-import { 
+import {
   MouseMoveSchema, 
   MouseClickSchema, 
-  MouseButtonActionSchema, 
+  MouseButtonActionSchema,
   MouseScrollSchema, 
   KeyboardKeySchema, 
   KeyboardTypeSchema,
@@ -12,6 +12,7 @@ import {
   TerminalKillSchema,
   WebRTCSignalSchema,
   VoiceExecutionRequestSchema,
+  PairingRequestSchema,
   RevokeSessionSchema,
   AuthSession,
 } from "@jarvis/shared";
@@ -21,6 +22,7 @@ import { terminalManager } from "../services/terminalManager.js";
 import { voiceEngine } from "../services/voiceEngine.js";
 import { automationExecutor } from "../services/automationExecutor.js";
 import { screenStreamManager } from "../services/screenStreamManager.js";
+import { verifyHostCredential } from "../services/hostAuth.js";
 import { CONFIG } from "../config.js";
 
 export function setupSocketHandlers(io: SocketIOServer) {
@@ -30,7 +32,22 @@ export function setupSocketHandlers(io: SocketIOServer) {
   });
 
   pairingManager.on("pairing_approved", (data) => {
-    io.emit("pairing:approved", data);
+    const target = pairingManager.getSocketIdForRequest(data.requestId);
+    if (target) {
+      io.to(target).emit("pairing:approved", {
+        ...data,
+        token: pairingManager.consumeTokenForRequest(data.requestId) ?? undefined,
+      });
+    } else {
+      // No known socket to deliver the token to; do not broadcast secrets.
+      io.emit("pairing:approved", {
+        requestId: data.requestId,
+        sessionId: data.sessionId,
+        clientName: data.clientName,
+        deviceType: data.deviceType,
+        clientFingerprint: data.clientFingerprint,
+      });
+    }
   });
 
   pairingManager.on("pairing_rejected", (data) => {
@@ -56,8 +73,18 @@ export function setupSocketHandlers(io: SocketIOServer) {
 
   // Connection handler
   io.on("connection", async (socket: Socket) => {
-    const isHost = socket.handshake.auth.isHost === true || socket.handshake.query.isHost === "true";
-    const token = socket.handshake.auth.token || socket.handshake.query.token;
+    const auth = (socket.handshake.auth || {}) as Record<string, unknown>;
+    const query = (socket.handshake.query || {}) as Record<string, unknown>;
+    const token = auth.token || query.token;
+
+    // Host role is NEVER self-asserted. It requires a server-issued credential.
+    const hostCredential =
+      auth.hostCredential ||
+      auth.hostKey ||
+      query.hostCredential ||
+      query.hostKey;
+    const isHostCandidate = Boolean(auth.isHost) || query.isHost === "true";
+    const isHost = isHostCandidate && verifyHostCredential(hostCredential);
 
     let session: AuthSession | null = null;
 
@@ -81,12 +108,32 @@ export function setupSocketHandlers(io: SocketIOServer) {
     }
 
     // --- Pairing Events ---
+    socket.on("pairing:request", async (payload) => {
+      const parsed = PairingRequestSchema.safeParse(payload);
+      if (!parsed.success) return;
+
+      const clientIp =
+        (socket.handshake.headers["x-forwarded-for"] as string) ||
+        socket.handshake.address ||
+        "unknown";
+
+      const { immediate, requestId } = pairingManager.submitPairing(parsed.data, clientIp, socket.id);
+      socket.emit("pairing:status", {
+        requestId,
+        status: immediate ? immediate.status : "pending",
+        message: immediate?.message,
+      });
+    });
+
     socket.on("pairing:decision", async (payload: { requestId: string; decision: "approve" | "reject" }) => {
       if (!isHost) return;
-      await pairingManager.handleHostDecision(payload.requestId, payload.decision);
+      await pairingManager.handleHostDecision(payload.requestId, payload.decision, socket.id);
     });
 
     socket.on("session:revoke", (payload) => {
+      if (!isHost) {
+        return;
+      }
       const parsed = RevokeSessionSchema.safeParse(payload);
       if (parsed.success) {
         pairingManager.revokeSession(parsed.data.sessionId, parsed.data.reason);
@@ -190,7 +237,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalSpawnSchema.safeParse(data || {});
         if (parsed.success) {
-          const inst = terminalManager.createSession(parsed.data);
+          const inst = terminalManager.createSession(parsed.data, socket.id);
           socket.join(`term-${inst.sessionId}`);
           socket.emit("terminal:ready", { sessionId: inst.sessionId, cols: inst.cols, rows: inst.rows });
         }
@@ -201,7 +248,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalInputSchema.safeParse(data);
         if (parsed.success) {
-          terminalManager.write(parsed.data.sessionId, parsed.data.data);
+          terminalManager.write(parsed.data.sessionId, parsed.data.data, socket.id);
         }
       });
     });
@@ -210,7 +257,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalResizeSchema.safeParse(data);
         if (parsed.success) {
-          terminalManager.resize(parsed.data);
+          terminalManager.resize(parsed.data, socket.id);
         }
       });
     });
@@ -219,7 +266,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalKillSchema.safeParse(data);
         if (parsed.success) {
-          terminalManager.kill(parsed.data.sessionId);
+          terminalManager.kill(parsed.data.sessionId, socket.id);
         }
       });
     });

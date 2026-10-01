@@ -19,6 +19,8 @@ export interface PendingApproval {
   deviceType: "phone" | "tablet" | "desktop" | "browser";
   clientIp: string;
   requestedAt: number;
+  /** Socket that is waiting for this request's decision. */
+  socketId?: string;
   resolve: (value: { approved: boolean; token?: string; sessionId?: string; error?: string }) => void;
 }
 
@@ -28,6 +30,10 @@ export class PairingManager extends EventEmitter {
   private activeSessions = new Map<string, AuthSession>();
   private revokedSessions = new Set<string>();
   private rateLimits = new Map<string, { count: number; resetAt: number }>();
+  /** Tokens awaiting delivery to the paired controller socket. */
+  private pendingTokens = new Map<string, { token: string; expiresAt: number }>();
+  /** Socket awaiting each request's decision, retained after approval. */
+  private requestSockets = new Map<string, string>();
 
   constructor() {
     super();
@@ -63,30 +69,45 @@ export class PairingManager extends EventEmitter {
   }
 
   /**
-   * Validates pairing challenge and checks rate limits
+   * Validates a pairing challenge and registers a pending approval request.
+   *
+   * Validation (rate limit, nonce, expiry) completes synchronously so callers
+   * can answer the HTTP request immediately; the returned promise settles only
+   * when the Host approves or rejects, or after the approval timeout.
    */
-  public async requestPairing(
-    request: PairingRequest, 
-    clientIp: string
-  ): Promise<{ status: "pending" | "rejected" | "expired" | "rate_limited"; requestId?: string; message?: string }> {
+  public submitPairing(
+    request: PairingRequest,
+    clientIp: string,
+    socketId?: string
+  ): {
+    immediate?: { status: "rejected" | "expired" | "rate_limited"; message: string };
+    requestId?: string;
+    pending?: Promise<{ status: "pending" | "rejected"; requestId?: string; message?: string }>;
+  } {
     // 1. Rate limiting check
     if (this.isRateLimited(clientIp)) {
-      return { status: "rate_limited", message: "Too many pairing attempts. Please wait 1 minute." };
+      return {
+        immediate: { status: "rate_limited", message: "Too many pairing attempts. Please wait 1 minute." },
+      };
     }
 
     // 2. Validate Challenge
     const challenge = this.activeChallenges.get(request.challengeId);
     if (!challenge) {
-      return { status: "expired", message: "Pairing challenge not found or already consumed." };
+      return {
+        immediate: { status: "expired", message: "Pairing challenge not found or already consumed." },
+      };
     }
 
     if (Date.now() > challenge.expiresAt) {
       this.activeChallenges.delete(request.challengeId);
-      return { status: "expired", message: "Pairing QR code has expired. Please refresh QR code." };
+      return {
+        immediate: { status: "expired", message: "Pairing QR code has expired. Please refresh QR code." },
+      };
     }
 
     if (challenge.nonce !== request.nonce) {
-      return { status: "rejected", message: "Invalid pairing nonce challenge." };
+      return { immediate: { status: "rejected", message: "Invalid pairing nonce challenge." } };
     }
 
     // Consume the challenge (one-time use)
@@ -94,47 +115,72 @@ export class PairingManager extends EventEmitter {
 
     // 3. Create pending approval request
     const requestId = generateUUID();
-    
-    return new Promise((resolve) => {
-      const pending: PendingApproval = {
-        requestId,
-        challengeId: request.challengeId,
-        clientName: request.clientName,
-        clientFingerprint: request.clientFingerprint,
-        deviceType: request.deviceType,
-        clientIp,
-        requestedAt: Date.now(),
-        resolve: (result) => {
-          this.pendingApprovals.delete(requestId);
-          if (result.approved && result.token) {
-            resolve({ status: "pending", requestId });
-          } else {
-            resolve({ status: "rejected", message: result.error || "Host denied pairing request." });
-          }
-        },
-      };
 
-      this.pendingApprovals.set(requestId, pending);
+    const pending = new Promise<{ status: "pending" | "rejected"; requestId?: string; message?: string }>(
+      (resolve) => {
+        const entry: PendingApproval = {
+          requestId,
+          challengeId: request.challengeId,
+          clientName: request.clientName,
+          clientFingerprint: request.clientFingerprint,
+          deviceType: request.deviceType,
+          clientIp,
+          requestedAt: Date.now(),
+          ...(socketId ? { socketId } : {}),
+          resolve: (result) => {
+            this.pendingApprovals.delete(requestId);
+            if (result.approved && result.token) {
+              resolve({ status: "pending", requestId });
+            } else {
+              resolve({ status: "rejected", message: result.error || "Host denied pairing request." });
+            }
+          },
+        };
 
-      // Emit event so Host UI / Desktop shell can prompt user for approval
-      this.emit("pairing_requested", {
-        requestId,
-        clientName: request.clientName,
-        deviceType: request.deviceType,
-        clientIp,
-        clientFingerprint: request.clientFingerprint,
-        requestedAt: pending.requestedAt,
-      });
-
-      // Auto-reject if host doesn't answer within 45 seconds
-      const timeout = setTimeout(() => {
-        if (this.pendingApprovals.has(requestId)) {
-          this.pendingApprovals.delete(requestId);
-          resolve({ status: "rejected", message: "Pairing request timed out awaiting host approval." });
+        this.pendingApprovals.set(requestId, entry);
+        if (socketId) {
+          this.requestSockets.set(requestId, socketId);
         }
-      }, 45000);
-      if (timeout.unref) timeout.unref();
-    });
+
+        // Emit event so Host UI / Desktop shell can prompt user for approval
+        this.emit("pairing_requested", {
+          requestId,
+          clientName: request.clientName,
+          deviceType: request.deviceType,
+          clientIp,
+          clientFingerprint: request.clientFingerprint,
+          requestedAt: entry.requestedAt,
+        });
+
+        // Auto-reject if host doesn't answer within 45 seconds
+        const timeout = setTimeout(() => {
+          if (this.pendingApprovals.has(requestId)) {
+            this.pendingApprovals.delete(requestId);
+            this.requestSockets.delete(requestId);
+            resolve({ status: "rejected", message: "Pairing request timed out awaiting host approval." });
+          }
+        }, 45000);
+        if (timeout.unref) timeout.unref();
+      }
+    );
+
+    return { requestId, pending };
+  }
+
+  /**
+   * Convenience wrapper that awaits the Host's decision.
+   */
+  public async requestPairing(
+    request: PairingRequest,
+    clientIp: string,
+    socketId?: string
+  ): Promise<{ status: "pending" | "rejected" | "expired" | "rate_limited"; requestId?: string; message?: string }> {
+    const { immediate, requestId, pending } = this.submitPairing(request, clientIp, socketId);
+    if (immediate) {
+      return { status: immediate.status, message: immediate.message };
+    }
+    const result = await pending!;
+    return { ...result, requestId: result.requestId ?? requestId };
   }
 
   /**
@@ -142,7 +188,8 @@ export class PairingManager extends EventEmitter {
    */
   public async handleHostDecision(
     requestId: string, 
-    decision: "approve" | "reject"
+    decision: "approve" | "reject",
+    hostSocketId?: string
   ): Promise<{ success: boolean; session?: AuthSession; message?: string }> {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) {
@@ -179,6 +226,16 @@ export class PairingManager extends EventEmitter {
     };
 
     this.activeSessions.set(sessionId, session);
+
+    // The HTTP /api/pairing/request call already returned "pending_approval",
+    // so the token must reach the controller over its socket. Store it for
+    // single delivery instead of dropping it after the resolved promise.
+    this.pendingTokens.set(requestId, { token, expiresAt: Date.now() + 60000 });
+    const waitingSocket = pending.socketId || hostSocketId;
+    if (waitingSocket) {
+      this.requestSockets.set(requestId, waitingSocket);
+    }
+
     pending.resolve({ approved: true, token, sessionId });
     this.pendingApprovals.delete(requestId);
 
@@ -222,6 +279,23 @@ export class PairingManager extends EventEmitter {
     return Array.from(this.pendingApprovals.values()).map(({ resolve, ...rest }) => rest);
   }
 
+  /** Socket awaiting the outcome of a pairing request, if it registered one. */
+  public getSocketIdForRequest(requestId: string): string | undefined {
+    return this.requestSockets.get(requestId) || this.pendingApprovals.get(requestId)?.socketId;
+  }
+
+  /**
+   * Returns and clears the token issued for a pairing request.
+   * Single-use so an approved credential is delivered at most once.
+   */
+  public consumeTokenForRequest(requestId: string): string | null {
+    const entry = this.pendingTokens.get(requestId);
+    if (!entry) return null;
+    this.pendingTokens.delete(requestId);
+    if (Date.now() > entry.expiresAt) return null;
+    return entry.token;
+  }
+
   public getActiveSessions(): AuthSession[] {
     return Array.from(this.activeSessions.values()).filter((s) => s.status === "active");
   }
@@ -261,6 +335,18 @@ export class PairingManager extends EventEmitter {
     for (const [id, challenge] of this.activeChallenges.entries()) {
       if (now > challenge.expiresAt) {
         this.activeChallenges.delete(id);
+      }
+    }
+    for (const [id, entry] of this.pendingTokens.entries()) {
+      if (now > entry.expiresAt) {
+        this.pendingTokens.delete(id);
+        this.requestSockets.delete(id);
+      }
+    }
+    for (const [id, session] of this.activeSessions.entries()) {
+      if (now > session.expiresAt && session.status === "active") {
+        session.status = "expired";
+        this.revokedSessions.add(id);
       }
     }
   }

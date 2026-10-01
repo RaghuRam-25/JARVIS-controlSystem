@@ -7,6 +7,8 @@ export interface DisplayMetrics {
   scaleFactor: number;
 }
 
+const ALLOWED_MOUSE_BUTTONS = new Set(["left", "right", "middle"]);
+
 export class InputAutomationService {
   private displayMetrics: DisplayMetrics = { width: 1920, height: 1080, scaleFactor: 1 };
   private psProcess: any = null;
@@ -189,8 +191,8 @@ export class InputAutomationService {
       this.handleMouseMove({ normalizedX: data.normalizedX, normalizedY: data.normalizedY, isRelative: false });
     }
     const isDouble = Boolean(data.double);
-    const btn = data.button || "left";
-    this.sendCommand(`[WinInput]::Click('${btn}', $${isDouble ? "true" : "false"})`);
+    const btn = ALLOWED_MOUSE_BUTTONS.has(data.button) ? data.button : "left";
+    this.sendCommand(`[WinInput]::Click('${btn}', ${isDouble ? "$true" : "$false"})`);
   }
 
   /**
@@ -200,7 +202,9 @@ export class InputAutomationService {
     if (data.normalizedX !== undefined && data.normalizedY !== undefined) {
       this.handleMouseMove({ normalizedX: data.normalizedX, normalizedY: data.normalizedY, isRelative: false });
     }
-    this.sendCommand(`[WinInput]::Button('${data.button}', '${data.action}')`);
+    const btn = ALLOWED_MOUSE_BUTTONS.has(data.button) ? data.button : "left";
+    const action = data.action === "down" ? "down" : "up";
+    this.sendCommand(`[WinInput]::Button('${btn}', '${action}')`);
   }
 
   /**
@@ -216,15 +220,35 @@ export class InputAutomationService {
    */
   public handleKeyboardType(data: KeyboardType) {
     if (!data.text) return;
-    // Escape special chars for PowerShell SendKeys
-    const escaped = data.text
-      .replace(/[\{\}\(\)\+\^\%\[\]\~]/g, "{$&}")
-      .replace(/"/g, '`"');
-    this.sendCommand(`Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("${escaped}")`);
+    // SendKeys escaping: braces are token syntax and quotes/backticks terminate
+    // the PowerShell string literal, so all of them must be neutralized.
+    const escaped = this.escapeForSendKeys(data.text);
+    this.sendCommand(
+      `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escaped}')`
+    );
+  }
+
+  /**
+   * Escapes untrusted text for embedding inside a single-quoted PowerShell
+   * literal that is then passed to SendKeys.
+   *
+   * Order matters: PowerShell escapes the quote first, then SendKeys braces.
+   */
+  private escapeForSendKeys(text: string): string {
+    return text
+      .replace(/'/g, "''")
+      .replace(/[{}\[\]()+^%~]/g, (match) => `{${match}}`)
+      .replace(/\r/g, "{ENTER}")
+      .replace(/\n/g, "{ENTER}")
+      .replace(/\t/g, "{TAB}");
   }
 
   /**
    * Remote Key Action (Special keys like Enter, Backspace, Esc, Shortcuts)
+   *
+   * Only keys in the allow-list below can be emitted. The incoming `key` value
+   * is attacker-controlled, and it is written into a PowerShell command line, so
+   * accepting arbitrary text would allow arbitrary command execution.
    */
   public handleKeyboardKey(data: KeyboardKey) {
     const keyMap: Record<string, string> = {
@@ -232,6 +256,7 @@ export class InputAutomationService {
       Backspace: "{BACKSPACE}",
       Tab: "{TAB}",
       Escape: "{ESC}",
+      Esc: "{ESC}",
       ArrowUp: "{UP}",
       ArrowDown: "{DOWN}",
       ArrowLeft: "{LEFT}",
@@ -244,18 +269,30 @@ export class InputAutomationService {
       Space: " ",
     };
 
-    let sendKeyStr = keyMap[data.key] || data.key;
+    const modifierMap: Record<string, string> = {
+      Ctrl: "^",
+      Control: "^",
+      Alt: "%",
+      Shift: "+",
+      Meta: "%",
+      Win: "^",
+    };
+
+    const sendKeyStr = keyMap[data.key] || modifierMap[data.key];
+    if (!sendKeyStr) {
+      return;
+    }
+
+    let prefix = "";
     if (data.modifiers) {
-      let prefix = "";
       if (data.modifiers.ctrl) prefix += "^";
       if (data.modifiers.shift) prefix += "+";
       if (data.modifiers.alt) prefix += "%";
-      sendKeyStr = prefix + sendKeyStr;
     }
 
-    if (data.action === "press" || data.action === "down") {
-      this.sendCommand(`Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("${sendKeyStr}")`);
-    }
+    this.sendCommand(
+      `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${prefix}${sendKeyStr}')`
+    );
   }
 
   public cleanup() {

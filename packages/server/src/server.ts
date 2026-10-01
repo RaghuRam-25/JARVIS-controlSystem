@@ -18,10 +18,37 @@ const corsOrigins = CONFIG.CORS_ORIGIN === "*"
 app.use(cors({
   origin: corsOrigins,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Jarvis-Token", "X-Jarvis-Host-Credential"],
+  maxAge: 600,
 }));
 
-app.use(express.json());
+// Pairing payloads and status updates are small; terminal/video frames travel
+// over Socket.IO, not through this parser.
+app.use(express.json({ limit: "256kb" }));
+
+// Simple in-process rate limiter for the unauthenticated pairing entry points.
+const pairingAttempts = new Map<string, { count: number; resetAt: number }>();
+app.use("/api/pairing", (req, res, next) => {
+  if (req.method !== "POST") return next();
+  const route = req.originalUrl.split("?")[0];
+  if (route === "/api/pairing/decision" || route === "/api/pairing/revoke-all" || route === "/api/pairing/revoke") {
+    return next();
+  }
+
+  const key = req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const entry = pairingAttempts.get(key);
+  if (!entry || now > entry.resetAt) {
+    pairingAttempts.set(key, { count: 1, resetAt: now + 60000 });
+    return next();
+  }
+  entry.count += 1;
+  if (entry.count > 30) {
+    res.status(429).json({ success: false, message: "Too many requests." });
+    return;
+  }
+  next();
+});
 
 // Mount API routes
 app.use(apiRouter);
@@ -31,10 +58,12 @@ const io = new SocketIOServer(server, {
   cors: {
     origin: corsOrigins,
     methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   },
-  pingTimeout: 10000,
-  pingInterval: 5000,
-  maxHttpBufferSize: 1e8, // 100MB for media/terminal chunks
+  pingTimeout: 20000,
+  pingInterval: 10000,
+  // Terminal I/O is line-based; 8 MB is ample and blocks oversized-frame DoS.
+  maxHttpBufferSize: 8 * 1024 * 1024,
 });
 
 setupSocketHandlers(io);

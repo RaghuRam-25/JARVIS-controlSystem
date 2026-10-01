@@ -107,6 +107,16 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     const socket = getSocket(serverUrl, { token });
     socketRef.current = socket;
 
+    // Approval delivers the signed token on this very socket; connectToHost is
+    // then re-invoked with that token so the session can be authenticated.
+    socket.on("pairing:approved", (decision: any) => {
+      if (!decision?.token) return;
+      setIsWaitingApproval(false);
+      setIsPaired(true);
+      setAuthToken(decision.token);
+      connectToHost(ip, decision.token);
+    });
+
     socket.on("connect", () => {
       console.log("Connected to JARVIS host:", ip);
       setIsPaired(true);
@@ -190,6 +200,11 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       const deviceName = `${navigator.userAgent.includes("Android") ? "Android Phone" : "Mobile Controller"} (${navigator.platform})`;
       const fingerprint = `client-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
+      // The socket must exist before the request so the Agent knows where to
+      // deliver the signed session token once the Host approves.
+      const socket = getSocket(ip);
+      socketRef.current = socket;
+
       const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, resolveHostApiUrl(ip)), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -208,18 +223,6 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         setIsWaitingApproval(false);
         return;
       }
-
-      // Listen for socket approval
-      const socket = getSocket(ip);
-      socketRef.current = socket;
-      socket.on("pairing:approved", (decision: any) => {
-        if (decision.clientFingerprint === fingerprint) {
-          setIsWaitingApproval(false);
-          setIsPaired(true);
-          setAuthToken(decision.token);
-          connectToHost(ip, decision.token);
-        }
-      });
     } catch (err: any) {
       alert(`Connection failed: ${err.message}`);
       setIsWaitingApproval(false);
