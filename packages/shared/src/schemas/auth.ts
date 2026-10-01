@@ -23,6 +23,7 @@ export const PairingRequestSchema = z.object({
   clientFingerprint: z.string().min(16),
   deviceType: DeviceTypeSchema,
   userAgent: z.string().optional(),
+  socketId: z.string().optional(),
 });
 export type PairingRequest = z.infer<typeof PairingRequestSchema>;
 

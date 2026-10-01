@@ -61,12 +61,13 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
   const [serverUrl, setServerUrl] = useState<string>(getApiBaseUrl());
   const [hostCredential, setHostCredential] = useState<string | null>(null);
 
+  const hostCredentialRef = useRef<string | null>(null);
   const socketRef = useRef<any>(null);
   const webrtcStreamerRef = useRef<WebRTCStreamer | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const hostAuthHeaders = (cred?: string | null): Record<string, string> => {
-    const key = cred !== undefined ? cred : hostCredential;
+    const key = cred !== undefined ? cred : (hostCredentialRef.current || hostCredential);
     return key ? { "X-Jarvis-Host-Credential": key } : {};
   };
 
@@ -78,6 +79,7 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
     // The host role requires a credential from the Agent.
     fetchHostCredential(apiBase).then((credential) => {
       setHostCredential(credential);
+      hostCredentialRef.current = credential;
 
       const socket = getSocket(apiBase, { isHost: true, hostCredential: credential || undefined });
       socketRef.current = socket;
@@ -96,7 +98,7 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
       });
 
       socket.on("pairing:approved", () => {
-        fetchSessions(apiBase, credential);
+        fetchSessions(apiBase, hostCredentialRef.current);
         fetchChallenge(apiBase);
       });
 
@@ -105,7 +107,7 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
       });
 
       socket.on("session:revoked", () => {
-        fetchSessions(apiBase, credential);
+        fetchSessions(apiBase, hostCredentialRef.current);
       });
 
       socket.on("session:revoked_all", () => {
@@ -118,8 +120,12 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
 
     fetchChallenge(apiBase);
 
-    // Refresh system status every 10 seconds
-    const statusInterval = setInterval(() => fetchSystemStatus(apiBase), 10000);
+    // Refresh system status every 10 seconds with current credential
+    const statusInterval = setInterval(() => {
+      if (hostCredentialRef.current) {
+        fetchSystemStatus(apiBase, hostCredentialRef.current);
+      }
+    }, 10000);
 
     return () => {
       clearInterval(statusInterval);

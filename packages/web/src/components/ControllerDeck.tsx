@@ -208,16 +208,50 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       const socket = getSocket(serverUrl);
       socketRef.current = socket;
 
+      // Listen for approval on this socket
+      socket.off("pairing:approved");
+      socket.on("pairing:approved", (decision: any) => {
+        if (!decision?.token) return;
+        setIsWaitingApproval(false);
+        setIsPaired(true);
+        setAuthToken(decision.token);
+        connectToHost(targetHost, decision.token);
+      });
+
+      socket.off("pairing:rejected");
+      socket.on("pairing:rejected", (payload: any) => {
+        alert(payload?.message || "Pairing rejected by host.");
+        setIsWaitingApproval(false);
+      });
+
+      // Wait briefly for socket connection to obtain socket.id if not already connected
+      let socketId = socket.id;
+      if (!socketId && !socket.connected) {
+        socketId = await new Promise<string | undefined>((resolve) => {
+          socket.once("connect", () => resolve(socket.id));
+          setTimeout(() => resolve(socket.id), 1500);
+        });
+      }
+
+      const pairingPayload = {
+        challengeId,
+        nonce,
+        clientName: deviceName,
+        clientFingerprint: fingerprint,
+        deviceType: "phone" as const,
+        socketId: socketId || undefined,
+      };
+
+      // Also emit via socket for real-time delivery
+      socket.emit("pairing:request", pairingPayload);
+
       const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, serverUrl), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          challengeId,
-          nonce,
-          clientName: deviceName,
-          clientFingerprint: fingerprint,
-          deviceType: "phone",
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(socketId ? { "X-Socket-Id": socketId } : {}),
+        },
+        body: JSON.stringify(pairingPayload),
       });
 
       const data = await res.json();

@@ -141,10 +141,14 @@ apiRouter.post("/api/pairing/request", async (req: Request, res: Response) => {
       ? forwarded.split(",")[0].trim()
       : req.socket.remoteAddress || "unknown";
 
+  const socketId =
+    parsed.data.socketId ||
+    (typeof req.headers["x-socket-id"] === "string" ? req.headers["x-socket-id"] : undefined);
+
   // requestPairing resolves only once the Host decides. Awaiting it here would
   // hold the HTTP connection open for up to 45s; the decision is delivered to
   // the controller over its socket, so this responds immediately.
-  const { immediate, requestId, pending } = pairingManager.submitPairing(parsed.data, clientIp);
+  const { immediate, requestId, pending } = pairingManager.submitPairing(parsed.data, clientIp, socketId);
   pending?.catch(() => {
     /* the decision is delivered over the controller socket */
   });
