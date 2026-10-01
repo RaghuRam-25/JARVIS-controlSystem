@@ -61,3 +61,10 @@ export const RevokeSessionSchema = z.object({
   reason: z.string().optional(),
 });
 export type RevokeSession = z.infer<typeof RevokeSessionSchema>;
+
+export const CancelPairingSchema = z.object({
+  requestId: z.string().uuid().optional(),
+  challengeId: z.string().uuid().optional(),
+});
+export type CancelPairing = z.infer<typeof CancelPairingSchema>;
+

@@ -106,6 +106,10 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
         setPendingRequests((prev) => prev.filter((p) => p.requestId !== requestId));
       });
 
+      socket.on("pairing:cancelled", ({ requestId }: { requestId: string }) => {
+        setPendingRequests((prev) => prev.filter((p) => p.requestId !== requestId));
+      });
+
       socket.on("session:revoked", () => {
         fetchSessions(apiBase, hostCredentialRef.current);
       });
@@ -150,7 +154,11 @@ export function HostDeck({ onSwitchToController }: { onSwitchToController: () =>
 
   const fetchChallenge = async (apiBase = serverUrl) => {
     try {
-      const res = await fetch(apiUrl(API_ENDPOINTS.pairingChallenge, apiBase));
+      const challengeUrl = `${apiUrl(API_ENDPOINTS.pairingChallenge, apiBase)}?_t=${Date.now()}`;
+      const res = await fetch(challengeUrl, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
       const data = await res.json();
       if (data.success) {
         setQrDataUrl(data.qrDataUrl);

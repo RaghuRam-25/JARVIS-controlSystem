@@ -11,6 +11,13 @@ import {
 import { CONFIG } from "../config.js";
 import { getPrimaryLocalIp } from "./lan.js";
 
+export type ChallengeState = "created" | "pending_approval" | "approved" | "consumed" | "rejected" | "expired" | "cancelled";
+
+export interface ManagedChallenge extends PairingChallenge {
+  state: ChallengeState;
+  requestId?: string;
+}
+
 export interface PendingApproval {
   requestId: string;
   challengeId: string;
@@ -25,8 +32,9 @@ export interface PendingApproval {
 }
 
 export class PairingManager extends EventEmitter {
-  private activeChallenges = new Map<string, PairingChallenge>();
+  private activeChallenges = new Map<string, ManagedChallenge>();
   private pendingApprovals = new Map<string, PendingApproval>();
+  private pendingApprovalPromises = new Map<string, Promise<{ status: "pending" | "rejected"; requestId?: string; message?: string }>>();
   private activeSessions = new Map<string, AuthSession>();
   private revokedSessions = new Set<string>();
   private rateLimits = new Map<string, { count: number; resetAt: number }>();
@@ -52,10 +60,11 @@ export class PairingManager extends EventEmitter {
     const nonce = generateRandomHex(16);
     const hostIp = getPrimaryLocalIp();
     const now = Date.now();
+    const expiresAt = now + CONFIG.PAIRING_NONCE_TTL_MS;
 
     const publicUrl = CONFIG.PUBLIC_SERVER_URL;
 
-    const challenge: PairingChallenge = {
+    const challenge: ManagedChallenge = {
       challengeId,
       hostName: CONFIG.HOST_NAME,
       hostIp,
@@ -63,12 +72,24 @@ export class PairingManager extends EventEmitter {
       port: CONFIG.PORT,
       nonce,
       createdAt: now,
-      expiresAt: now + CONFIG.PAIRING_NONCE_TTL_MS,
+      expiresAt,
       fingerprint: `${CONFIG.HOST_NAME}@${publicUrl || hostIp}`,
+      state: "created",
     };
 
     this.activeChallenges.set(challengeId, challenge);
-    return challenge;
+    console.log(`[PAIRING] challenge created: challengeId=${challengeId}, createdAt=${now}, expiresAt=${expiresAt}`);
+    return {
+      challengeId: challenge.challengeId,
+      hostName: challenge.hostName,
+      hostIp: challenge.hostIp,
+      serverUrl: challenge.serverUrl,
+      port: challenge.port,
+      nonce: challenge.nonce,
+      createdAt: challenge.createdAt,
+      expiresAt: challenge.expiresAt,
+      fingerprint: challenge.fingerprint,
+    };
   }
 
   /**
@@ -89,6 +110,7 @@ export class PairingManager extends EventEmitter {
   } {
     // 1. Rate limiting check
     if (this.isRateLimited(clientIp)) {
+      console.warn(`[PAIRING] challenge rejected: rate limited (clientIp=${clientIp})`);
       return {
         immediate: { status: "rate_limited", message: "Too many pairing attempts. Please wait 1 minute." },
       };
@@ -97,27 +119,74 @@ export class PairingManager extends EventEmitter {
     // 2. Validate Challenge
     const challenge = this.activeChallenges.get(request.challengeId);
     if (!challenge) {
+      console.warn(`[PAIRING] challenge rejected: unknown (challengeId=${request.challengeId})`);
       return {
         immediate: { status: "expired", message: "Pairing challenge not found or already consumed." },
       };
     }
 
-    if (Date.now() > challenge.expiresAt) {
+    if (challenge.state === "consumed") {
+      console.warn(`[PAIRING] challenge rejected: consumed (challengeId=${request.challengeId})`);
+      return {
+        immediate: { status: "expired", message: "Pairing challenge not found or already consumed." },
+      };
+    }
+
+    if (challenge.state === "cancelled") {
+      console.warn(`[PAIRING] challenge rejected: cancelled (challengeId=${request.challengeId})`);
+      return {
+        immediate: { status: "expired", message: "Pairing request was cancelled. Please scan a new QR code." },
+      };
+    }
+
+    if (challenge.state === "rejected") {
+      console.warn(`[PAIRING] challenge rejected: denied by host (challengeId=${request.challengeId})`);
+      return {
+        immediate: { status: "rejected", message: "Pairing request was denied by host. Please refresh QR code." },
+      };
+    }
+
+    if (challenge.state === "expired" || Date.now() > challenge.expiresAt) {
+      challenge.state = "expired";
       this.activeChallenges.delete(request.challengeId);
+      console.warn(`[PAIRING] challenge rejected: expired (challengeId=${request.challengeId})`);
       return {
         immediate: { status: "expired", message: "Pairing QR code has expired. Please refresh QR code." },
       };
     }
 
     if (challenge.nonce !== request.nonce) {
+      console.warn(`[PAIRING] challenge rejected: invalid nonce (challengeId=${request.challengeId})`);
       return { immediate: { status: "rejected", message: "Invalid pairing nonce challenge." } };
     }
 
-    // Consume the challenge (one-time use)
-    this.activeChallenges.delete(request.challengeId);
+    // Handle Idempotent submission if already in pending_approval
+    if (challenge.state === "pending_approval" && challenge.requestId) {
+      const existingPending = this.pendingApprovals.get(challenge.requestId);
+      if (existingPending) {
+        console.log(`[PAIRING] challenge already pending approval (idempotent submission): challengeId=${request.challengeId}, requestId=${challenge.requestId}`);
+        if (socketId) {
+          existingPending.socketId = socketId;
+          this.requestSockets.set(challenge.requestId, socketId);
+        }
+        const pendingPromise = this.pendingApprovalPromises.get(challenge.requestId);
+        return { requestId: challenge.requestId, pending: pendingPromise };
+      }
+    }
 
-    // 3. Create pending approval request
+    // 3. Mark challenge as pending_approval (DO NOT consume until host approval / session creation)
+    challenge.state = "pending_approval";
     const requestId = generateUUID();
+    challenge.requestId = requestId;
+
+    console.log(`[PAIRING] challenge scanned: challengeId=${request.challengeId}, requestId=${requestId}`);
+    console.log(`[PAIRING] approval pending: requestId=${requestId}, clientName=${request.clientName}, deviceType=${request.deviceType}, clientIp=${clientIp}`);
+
+    if (socketId) {
+      this.requestSockets.set(requestId, socketId);
+    }
+
+    let timeoutHandle: NodeJS.Timeout | null = null;
 
     const pending = new Promise<{ status: "pending" | "rejected"; requestId?: string; message?: string }>(
       (resolve) => {
@@ -131,7 +200,12 @@ export class PairingManager extends EventEmitter {
           requestedAt: Date.now(),
           ...(socketId ? { socketId } : {}),
           resolve: (result) => {
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+              timeoutHandle = null;
+            }
             this.pendingApprovals.delete(requestId);
+            this.pendingApprovalPromises.delete(requestId);
             if (result.approved && result.token) {
               resolve({ status: "pending", requestId });
             } else {
@@ -141,13 +215,11 @@ export class PairingManager extends EventEmitter {
         };
 
         this.pendingApprovals.set(requestId, entry);
-        if (socketId) {
-          this.requestSockets.set(requestId, socketId);
-        }
 
         // Emit event so Host UI / Desktop shell can prompt user for approval
         this.emit("pairing_requested", {
           requestId,
+          challengeId: request.challengeId,
           clientName: request.clientName,
           deviceType: request.deviceType,
           clientIp,
@@ -156,16 +228,25 @@ export class PairingManager extends EventEmitter {
         });
 
         // Auto-reject if host doesn't answer within 45 seconds
-        const timeout = setTimeout(() => {
+        timeoutHandle = setTimeout(() => {
           if (this.pendingApprovals.has(requestId)) {
+            console.warn(`[PAIRING] pairing request timed out awaiting host approval: requestId=${requestId}`);
+            const ch = this.activeChallenges.get(request.challengeId);
+            if (ch && ch.state === "pending_approval") {
+              ch.state = "expired";
+              this.activeChallenges.delete(request.challengeId);
+            }
             this.pendingApprovals.delete(requestId);
+            this.pendingApprovalPromises.delete(requestId);
             this.requestSockets.delete(requestId);
             resolve({ status: "rejected", message: "Pairing request timed out awaiting host approval." });
           }
         }, 45000);
-        if (timeout.unref) timeout.unref();
+        if (timeoutHandle.unref) timeoutHandle.unref();
       }
     );
+
+    this.pendingApprovalPromises.set(requestId, pending);
 
     return { requestId, pending };
   }
@@ -196,17 +277,36 @@ export class PairingManager extends EventEmitter {
   ): Promise<{ success: boolean; session?: AuthSession; message?: string }> {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) {
+      console.warn(`[PAIRING] handleHostDecision failed: pending request not found or expired (requestId=${requestId})`);
       return { success: false, message: "Pending request not found or expired." };
     }
 
+    const challenge = this.activeChallenges.get(pending.challengeId);
+
     if (decision === "reject") {
+      console.log(`[PAIRING] host rejected: requestId=${requestId}, challengeId=${pending.challengeId}`);
+      if (challenge) {
+        challenge.state = "rejected";
+        this.activeChallenges.delete(pending.challengeId);
+      }
       pending.resolve({ approved: false, error: "Host rejected the connection request." });
       this.pendingApprovals.delete(requestId);
+      this.pendingApprovalPromises.delete(requestId);
       this.emit("pairing_rejected", { requestId });
       return { success: true, message: "Connection rejected." };
     }
 
-    // Approved: Issue signed session token
+    // Approved: Consume the challenge exactly once and create new controller session
+    if (challenge) {
+      challenge.state = "consumed";
+      this.activeChallenges.delete(pending.challengeId);
+      console.log(`[PAIRING] host approved: requestId=${requestId}`);
+      console.log(`[PAIRING] challenge consumed: challengeId=${pending.challengeId}`);
+    } else {
+      console.log(`[PAIRING] host approved: requestId=${requestId}`);
+    }
+
+    // Issue signed session token
     const sessionId = generateUUID();
     const now = Date.now();
     const expiresAt = now + CONFIG.SESSION_TTL_MS;
@@ -229,6 +329,7 @@ export class PairingManager extends EventEmitter {
     };
 
     this.activeSessions.set(sessionId, session);
+    console.log(`[PAIRING] session created: sessionId=${sessionId}, clientName=${session.clientName}, deviceType=${session.deviceType}`);
 
     // The HTTP /api/pairing/request call already returned "pending_approval",
     // so the token must reach the controller over its socket. Store it for
@@ -241,6 +342,7 @@ export class PairingManager extends EventEmitter {
 
     pending.resolve({ approved: true, token, sessionId });
     this.pendingApprovals.delete(requestId);
+    this.pendingApprovalPromises.delete(requestId);
 
     this.emit("pairing_approved", {
       requestId,
@@ -251,6 +353,57 @@ export class PairingManager extends EventEmitter {
     });
 
     return { success: true, session };
+  }
+
+  /**
+   * Controller explicitly cancels a pending pairing request
+   */
+  public cancelPairing(requestId: string): boolean {
+    const pending = this.pendingApprovals.get(requestId);
+    if (!pending) {
+      // Check if any challenge has this requestId
+      for (const [chId, ch] of this.activeChallenges.entries()) {
+        if (ch.requestId === requestId) {
+          ch.state = "cancelled";
+          this.activeChallenges.delete(chId);
+          console.log(`[PAIRING] pairing request cancelled (via challenge): requestId=${requestId}, challengeId=${chId}`);
+          this.emit("pairing_cancelled", { requestId, challengeId: chId });
+          return true;
+        }
+      }
+      return false;
+    }
+
+    console.log(`[PAIRING] pairing request cancelled: requestId=${requestId}, challengeId=${pending.challengeId}`);
+    const challenge = this.activeChallenges.get(pending.challengeId);
+    if (challenge) {
+      challenge.state = "cancelled";
+      this.activeChallenges.delete(pending.challengeId);
+    }
+
+    pending.resolve({ approved: false, error: "Pairing request was cancelled by controller." });
+    this.pendingApprovals.delete(requestId);
+    this.pendingApprovalPromises.delete(requestId);
+    this.requestSockets.delete(requestId);
+    this.pendingTokens.delete(requestId);
+
+    this.emit("pairing_cancelled", { requestId, challengeId: pending.challengeId });
+    return true;
+  }
+
+  /**
+   * Cancel by challenge ID
+   */
+  public cancelChallenge(challengeId: string): boolean {
+    const challenge = this.activeChallenges.get(challengeId);
+    if (!challenge) return false;
+    if (challenge.requestId) {
+      return this.cancelPairing(challenge.requestId);
+    }
+    challenge.state = "cancelled";
+    this.activeChallenges.delete(challengeId);
+    console.log(`[PAIRING] challenge cancelled directly: challengeId=${challengeId}`);
+    return true;
   }
 
   /**
@@ -308,6 +461,7 @@ export class PairingManager extends EventEmitter {
     if (session) {
       session.status = "revoked";
       this.revokedSessions.add(sessionId);
+      console.log(`[PAIRING] session revoked: sessionId=${sessionId}, clientName=${session.clientName}, reason="${reason}"`);
       this.emit("session_revoked", { sessionId, reason, clientName: session.clientName });
       return true;
     }
@@ -315,6 +469,7 @@ export class PairingManager extends EventEmitter {
   }
 
   public revokeAllSessions(reason = "Emergency disconnect all"): void {
+    console.log(`[PAIRING] all sessions revoked: reason="${reason}"`);
     for (const [id, session] of this.activeSessions.entries()) {
       session.status = "revoked";
       this.revokedSessions.add(id);
@@ -337,6 +492,7 @@ export class PairingManager extends EventEmitter {
     const now = Date.now();
     for (const [id, challenge] of this.activeChallenges.entries()) {
       if (now > challenge.expiresAt) {
+        challenge.state = "expired";
         this.activeChallenges.delete(id);
       }
     }
@@ -356,3 +512,4 @@ export class PairingManager extends EventEmitter {
 }
 
 export const pairingManager = new PairingManager();
+

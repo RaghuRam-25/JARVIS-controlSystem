@@ -87,6 +87,11 @@ apiRouter.get("/health", (req: Request, res: Response) => {
 // Generate Pairing Challenge & QR Payload
 apiRouter.get("/api/pairing/challenge", async (req: Request, res: Response) => {
   try {
+    // Ensure no browser or intermediate proxy caches the challenge response
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+
     const challenge = pairingManager.createChallenge();
     const primaryIp = getPrimaryLocalIp();
     const publicUrl = CONFIG.PUBLIC_SERVER_URL;
@@ -168,6 +173,21 @@ apiRouter.post("/api/pairing/request", async (req: Request, res: Response) => {
   });
 });
 
+// Controller cancels pending pairing request
+apiRouter.post("/api/pairing/cancel", (req: Request, res: Response) => {
+  const { requestId, challengeId } = req.body || {};
+  let cancelled = false;
+  if (typeof requestId === "string" && requestId) {
+    cancelled = pairingManager.cancelPairing(requestId);
+  } else if (typeof challengeId === "string" && challengeId) {
+    cancelled = pairingManager.cancelChallenge(challengeId);
+  }
+  res.json({
+    success: cancelled,
+    message: cancelled ? "Pairing request cancelled." : "No pending pairing request found to cancel.",
+  });
+});
+
 // Host approves/rejects pending pairing request
 apiRouter.post("/api/pairing/decision", requireHost, async (req: Request, res: Response) => {
   const parsed = HostApprovalDecisionSchema.safeParse(req.body);
@@ -195,14 +215,19 @@ apiRouter.get("/api/pairing/sessions", requireHost, (req: Request, res: Response
   });
 });
 
-// Revoke a session
-apiRouter.post("/api/pairing/revoke", requireHost, (req: Request, res: Response) => {
+// Revoke a session (allowed for Host or for paired controller revoking its own session)
+apiRouter.post("/api/pairing/revoke", requireHostOrSession, (req: Request, res: Response) => {
   const parsed = RevokeSessionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ success: false, errors: parsed.error.errors });
   }
 
-  const ok = pairingManager.revokeSession(parsed.data.sessionId, parsed.data.reason);
+  // If caller is authenticated as a controller session (not host credential), ensure they can only revoke their own session
+  if (res.locals.session && res.locals.session.sessionId !== parsed.data.sessionId) {
+    return res.status(403).json({ success: false, message: "Cannot revoke another device's session." });
+  }
+
+  const ok = pairingManager.revokeSession(parsed.data.sessionId, parsed.data.reason || "Revoked by user");
   res.json({ success: ok });
 });
 

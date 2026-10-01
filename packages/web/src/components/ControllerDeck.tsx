@@ -31,6 +31,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const [isPaired, setIsPaired] = useState<boolean>(false);
   const [isWaitingApproval, setIsWaitingApproval] = useState<boolean>(false);
   const [authToken, setAuthToken] = useState<string>("");
+  const [sessionId, setSessionId] = useState<string>("");
   const [hostIp, setHostIp] = useState<string>("");
   const [activeTab, setActiveTab] = useState<"screen" | "voice" | "security">("screen");
   const [manualNonce, setManualNonce] = useState<string>("");
@@ -66,8 +67,58 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   const longPressFiredRef = useRef<boolean>(false);
   const lastTouchCenterRef = useRef<{ x: number; y: number } | null>(null);
 
+  // Pairing & Scanner Refs
+  const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
+  const isScanningRef = useRef<boolean>(false);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const activeChallengeIdRef = useRef<string | null>(null);
+  const lastScannedChallengeRef = useRef<{ challengeId: string; timestamp: number } | null>(null);
+  const sessionIdRef = useRef<string>("");
+  const authTokenRef = useRef<string>("");
+  const hostIpRef = useRef<string>("");
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+    authTokenRef.current = authToken;
+    hostIpRef.current = hostIp;
+  }, [sessionId, authToken, hostIp]);
+
+  const stopQrScanner = useCallback(() => {
+    if (html5QrCodeRef.current) {
+      try {
+        html5QrCodeRef.current.stop().catch(() => {});
+      } catch {}
+      html5QrCodeRef.current = null;
+    }
+    setScannerActive(false);
+  }, []);
+
   const handleDisconnect = useCallback(() => {
-    // 1. Stop WebRTC streamer and clear video
+    // 1. Notify server of session revocation if actively paired
+    const currentSessionId = sessionIdRef.current || localStorage.getItem("jarvis_session_id");
+    const currentToken = authTokenRef.current || localStorage.getItem("jarvis_controller_token");
+    const currentHost = hostIpRef.current || localStorage.getItem("jarvis_host_ip");
+
+    if (currentSessionId && currentHost && currentToken) {
+      const serverUrl = resolveHostApiUrl(currentHost);
+      fetch(apiUrl(API_ENDPOINTS.pairingRevoke, serverUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${currentToken}`,
+        },
+        body: JSON.stringify({ sessionId: currentSessionId, reason: "Controller disconnected" }),
+      }).catch(() => {});
+
+      if (socketRef.current) {
+        socketRef.current.emit("session:revoke", {
+          sessionId: currentSessionId,
+          reason: "Controller disconnected",
+        });
+      }
+    }
+
+    // 2. Stop WebRTC streamer and clear video
     if (webrtcStreamerRef.current) {
       webrtcStreamerRef.current.stop();
       webrtcStreamerRef.current = null;
@@ -76,22 +127,28 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       videoRef.current.srcObject = null;
     }
 
-    // 2. Clean up socket
+    // 3. Clean up socket completely
     if (socketRef.current) {
       try {
         socketRef.current.removeAllListeners();
+        socketRef.current.disconnect();
       } catch {}
       socketRef.current = null;
     }
     disconnectSocket();
 
-    // 3. Clear stored tokens
+    // 4. Stop scanner if open
+    stopQrScanner();
+
+    // 5. Clear stored tokens and session IDs
     localStorage.removeItem("jarvis_controller_token");
+    localStorage.removeItem("jarvis_session_id");
     localStorage.removeItem("jarvis_host_ip");
 
-    // 4. Reset state
+    // 6. Reset all React states
     setIsPaired(false);
     setAuthToken("");
+    setSessionId("");
     setIsWaitingApproval(false);
     setStreamStatus("DISCONNECTED");
     setScannerActive(false);
@@ -102,7 +159,11 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     setPendingVoiceIntent(null);
     setTranscript("");
 
-    // 5. Reset refs
+    // 7. Reset all refs
+    activeRequestIdRef.current = null;
+    activeChallengeIdRef.current = null;
+    isScanningRef.current = false;
+    lastScannedChallengeRef.current = null;
     pointerDownPosRef.current = null;
     isDraggingRef.current = false;
     longPressFiredRef.current = false;
@@ -111,7 +172,46 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
-  }, []);
+  }, [stopQrScanner]);
+
+  const handleCancelRequest = useCallback(() => {
+    const reqId = activeRequestIdRef.current;
+    const chId = activeChallengeIdRef.current;
+    const currentHost = hostIpRef.current;
+
+    // Send cancellation to server
+    if (currentHost && (reqId || chId)) {
+      const serverUrl = resolveHostApiUrl(currentHost);
+      fetch(apiUrl(API_ENDPOINTS.pairingCancel, serverUrl), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId: reqId || undefined, challengeId: chId || undefined }),
+      }).catch(() => {});
+
+      if (socketRef.current) {
+        socketRef.current.emit("pairing:cancel", { requestId: reqId, challengeId: chId });
+      }
+    }
+
+    // Clean up temporary socket listeners
+    if (socketRef.current) {
+      try {
+        socketRef.current.off("pairing:approved");
+        socketRef.current.off("pairing:rejected");
+        socketRef.current.off("pairing:status");
+      } catch {}
+    }
+
+    // Reset waiting state & locks
+    activeRequestIdRef.current = null;
+    activeChallengeIdRef.current = null;
+    isScanningRef.current = false;
+    lastScannedChallengeRef.current = null;
+    setIsWaitingApproval(false);
+    setManualNonce("");
+    setManualChallengeId("");
+    stopQrScanner();
+  }, [stopQrScanner]);
 
   const initWebRTCViewer = useCallback((socket: any) => {
     setStreamStatus("WAITING_FOR_SCREEN");
@@ -139,7 +239,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     });
   }, []);
 
-  const connectToHost = useCallback((ip: string, token: string) => {
+  const connectToHost = useCallback((ip: string, token: string, newSessionId?: string) => {
     setStreamStatus("CONNECTING");
     const serverUrl = resolveHostApiUrl(ip);
     const socket = getSocket(serverUrl, { token }, true);
@@ -148,17 +248,25 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     socket.emit("auth:authenticate", { token });
 
     const initConnection = () => {
-      console.log("Connected and authenticated with JARVIS host:", ip);
+      console.log("[PAIRING] Connected and authenticated with JARVIS host:", ip);
       setIsPaired(true);
       setIsWaitingApproval(false);
       localStorage.setItem("jarvis_controller_token", token);
       localStorage.setItem("jarvis_host_ip", ip);
+      if (newSessionId) {
+        setSessionId(newSessionId);
+        localStorage.setItem("jarvis_session_id", newSessionId);
+      }
 
       initWebRTCViewer(socket);
     };
 
     socket.off("auth:success");
-    socket.on("auth:success", () => {
+    socket.on("auth:success", (payload?: any) => {
+      if (payload?.session?.sessionId) {
+        setSessionId(payload.session.sessionId);
+        localStorage.setItem("jarvis_session_id", payload.session.sessionId);
+      }
       initConnection();
     });
 
@@ -198,10 +306,12 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
   useEffect(() => {
     const savedToken = localStorage.getItem("jarvis_controller_token");
     const savedHostIp = localStorage.getItem("jarvis_host_ip");
+    const savedSessionId = localStorage.getItem("jarvis_session_id");
     if (savedToken && savedHostIp) {
       setAuthToken(savedToken);
       setHostIp(savedHostIp);
-      connectToHost(savedHostIp, savedToken);
+      if (savedSessionId) setSessionId(savedSessionId);
+      connectToHost(savedHostIp, savedToken, savedSessionId || undefined);
     }
   }, [connectToHost]);
 
@@ -237,57 +347,91 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
     }
   }, [voiceLang, transcript]);
 
-  // QR Scanner Handler
+  // QR Scanner Handler with Double-Submission Protection
   const startQrScanner = () => {
     setScannerActive(true);
+    isScanningRef.current = false;
     setTimeout(() => {
       const html5QrCode = new Html5Qrcode("qr-reader");
+      html5QrCodeRef.current = html5QrCode;
       html5QrCode.start(
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 250, height: 250 } },
         async (decodedText) => {
+          const now = Date.now();
+          // Prevent multiple concurrent submissions from rapid video frames
+          if (isScanningRef.current) return;
+
           try {
-            html5QrCode.stop();
-            setScannerActive(false);
             const payload = JSON.parse(decodedText);
+            if (!payload.challengeId || !payload.nonce) {
+              console.warn("Invalid QR code payload: missing challengeId or nonce");
+              return;
+            }
+
+            // Reject duplicate scan of the same challenge within 3 seconds
+            if (
+              lastScannedChallengeRef.current &&
+              lastScannedChallengeRef.current.challengeId === payload.challengeId &&
+              now - lastScannedChallengeRef.current.timestamp < 3000
+            ) {
+              return;
+            }
+
+            isScanningRef.current = true;
+            lastScannedChallengeRef.current = { challengeId: payload.challengeId, timestamp: now };
+
+            stopQrScanner();
+
             const targetHost = payload.serverUrl || payload.hostIp;
             await submitPairingRequest(targetHost, payload.challengeId, payload.nonce);
           } catch (err) {
-            console.error("Invalid QR payload", err);
+            console.error("Invalid QR payload format:", err);
           }
         },
         () => {}
       ).catch((err) => {
-        console.warn("Camera failed or denied:", err);
+        console.warn("Camera failed or permission denied:", err);
       });
     }, 200);
   };
 
   const submitPairingRequest = async (targetHost: string, challengeId: string, nonce: string) => {
+    if (!targetHost || !challengeId || !nonce) {
+      alert("Missing pairing details. Please scan a valid QR code.");
+      isScanningRef.current = false;
+      return;
+    }
+
     setIsWaitingApproval(true);
     setHostIp(targetHost);
+    activeChallengeIdRef.current = challengeId;
 
     try {
-      const deviceName = `${navigator.userAgent.includes("Android") ? "Android Phone" : "Mobile Controller"} (${navigator.platform})`;
+      const deviceName = `${navigator.userAgent.includes("Android") ? "Android Phone" : "Mobile Controller"} (${navigator.platform || "Touch"})`;
       const fingerprint = `client-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
       const serverUrl = resolveHostApiUrl(targetHost);
-      const socket = getSocket(serverUrl);
+      const socket = getSocket(serverUrl, undefined, true);
       socketRef.current = socket;
 
       // Listen for approval on this socket
       socket.off("pairing:approved");
       socket.on("pairing:approved", (decision: any) => {
         if (!decision?.token) return;
+        console.log("[PAIRING] Host approved connection request. Authenticating session...");
         setIsWaitingApproval(false);
         setIsPaired(true);
         setAuthToken(decision.token);
-        connectToHost(targetHost, decision.token);
+        if (decision.sessionId) setSessionId(decision.sessionId);
+        connectToHost(targetHost, decision.token, decision.sessionId);
       });
 
       socket.off("pairing:rejected");
       socket.on("pairing:rejected", (payload: any) => {
         alert(payload?.message || "Pairing rejected by host.");
+        isScanningRef.current = false;
+        lastScannedChallengeRef.current = null;
         setIsWaitingApproval(false);
       });
 
@@ -295,7 +439,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
       if (!socketId && !socket.connected) {
         socketId = await new Promise<string | undefined>((resolve) => {
           socket.once("connect", () => resolve(socket.id));
-          setTimeout(() => resolve(socket.id), 1500);
+          setTimeout(() => resolve(socket.id), 2000);
         });
       }
 
@@ -305,27 +449,37 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
         clientName: deviceName,
         clientFingerprint: fingerprint,
         deviceType: "phone" as const,
-        socketId: socketId || undefined,
+        socketId: socket.id || socketId || undefined,
       };
 
-      socket.emit("pairing:request", pairingPayload);
-
+      // Submit pairing request via REST (single dispatch, carrying socketId for approval delivery)
       const res = await fetch(apiUrl(API_ENDPOINTS.pairingRequest, serverUrl), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(socketId ? { "X-Socket-Id": socketId } : {}),
+          ...(pairingPayload.socketId ? { "X-Socket-Id": pairingPayload.socketId } : {}),
         },
         body: JSON.stringify(pairingPayload),
       });
 
       const data = await res.json();
       if (!data.success) {
-        alert(data.message || "Pairing rejected");
+        isScanningRef.current = false;
+        lastScannedChallengeRef.current = null;
         setIsWaitingApproval(false);
+
+        if (data.message?.includes("expired") || data.message?.includes("consumed")) {
+          alert("PAIRING EXPIRED or ALREADY CONSUMED.\nPlease scan the NEW QR from the Host PC.");
+        } else {
+          alert(data.message || "Pairing request rejected by server.");
+        }
         return;
       }
+
+      activeRequestIdRef.current = data.requestId || null;
     } catch (err: any) {
+      isScanningRef.current = false;
+      lastScannedChallengeRef.current = null;
       alert(`Connection failed: ${err.message}`);
       setIsWaitingApproval(false);
     }
@@ -606,8 +760,8 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
               <p className="text-sm font-semibold text-cyan-300">Awaiting Host Approval on Windows PC...</p>
               <p className="text-xs text-slate-500">Please click "Approve" on your PC screen</p>
               <button
-                onClick={() => setIsWaitingApproval(false)}
-                className="text-xs text-red-400 hover:underline mt-2"
+                onClick={handleCancelRequest}
+                className="px-3 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900 text-xs text-red-400 border border-red-500/30 transition-colors mt-2"
               >
                 Cancel Request
               </button>
@@ -619,7 +773,7 @@ export function ControllerDeck({ onSwitchToHost }: { onSwitchToHost: () => void 
                 <div className="w-full flex flex-col items-center gap-3">
                   <div id="qr-reader" className="w-full max-w-xs rounded-xl overflow-hidden border-2 border-cyan-500/40" />
                   <button
-                    onClick={() => setScannerActive(false)}
+                    onClick={stopQrScanner}
                     className="text-xs text-slate-400 hover:text-red-400"
                   >
                     Close Camera Scanner

@@ -23,6 +23,7 @@ export const API_ENDPOINTS = {
   health: "/health",
   pairingChallenge: "/api/pairing/challenge",
   pairingRequest: "/api/pairing/request",
+  pairingCancel: "/api/pairing/cancel",
   pairingDecision: "/api/pairing/decision",
   pairingPending: "/api/pairing/pending",
   pairingSessions: "/api/pairing/sessions",

@@ -54,6 +54,11 @@ export function setupSocketHandlers(io: SocketIOServer) {
     io.emit("pairing:rejected", data);
   });
 
+  pairingManager.on("pairing_cancelled", (data) => {
+    io.to("host-room").emit("pairing:cancelled", data);
+    io.emit("pairing:cancelled", data);
+  });
+
   pairingManager.on("session_revoked", (data) => {
     io.emit("session:revoked", data);
   });
@@ -140,18 +145,26 @@ export function setupSocketHandlers(io: SocketIOServer) {
       });
     });
 
+    socket.on("pairing:cancel", (payload: { requestId?: string; challengeId?: string }) => {
+      if (payload?.requestId) {
+        pairingManager.cancelPairing(payload.requestId);
+      } else if (payload?.challengeId) {
+        pairingManager.cancelChallenge(payload.challengeId);
+      }
+    });
+
     socket.on("pairing:decision", async (payload: { requestId: string; decision: "approve" | "reject" }) => {
       if (!isHost) return;
       await pairingManager.handleHostDecision(payload.requestId, payload.decision, socket.id);
     });
 
     socket.on("session:revoke", (payload) => {
-      if (!isHost) {
-        return;
-      }
       const parsed = RevokeSessionSchema.safeParse(payload);
       if (parsed.success) {
-        pairingManager.revokeSession(parsed.data.sessionId, parsed.data.reason);
+        // Allow if host OR if controller session is revoking its own session
+        if (isHost || (session && session.sessionId === parsed.data.sessionId)) {
+          pairingManager.revokeSession(parsed.data.sessionId, parsed.data.reason || "Revoked by user");
+        }
       }
     });
 

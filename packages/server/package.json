@@ -11,7 +11,8 @@
     "test:security": "tsx src/tests/security.test.ts",
     "test:hardening": "tsx src/tests/hardening.test.ts",
     "test:http": "tsx src/tests/http.integration.test.ts",
-    "test:e2e": "tsx src/tests/e2e.test.ts"
+    "test:e2e": "tsx src/tests/e2e.test.ts",
+    "test:reconnect": "tsx src/tests/reconnect.lifecycle.test.ts"
   },
   "dependencies": {
     "@jarvis/shared": "*",
