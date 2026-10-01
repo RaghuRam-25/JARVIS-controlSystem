@@ -249,20 +249,27 @@ public class WinInputNative {
   public handleKeyboardKey(data: KeyboardKey) {
     const keyMap: Record<string, string> = {
       Enter: "{ENTER}",
+      Return: "{ENTER}",
       Backspace: "{BACKSPACE}",
       Tab: "{TAB}",
       Escape: "{ESC}",
       Esc: "{ESC}",
       ArrowUp: "{UP}",
+      Up: "{UP}",
       ArrowDown: "{DOWN}",
+      Down: "{DOWN}",
       ArrowLeft: "{LEFT}",
+      Left: "{LEFT}",
       ArrowRight: "{RIGHT}",
+      Right: "{RIGHT}",
       Delete: "{DELETE}",
+      Del: "{DELETE}",
       Home: "{HOME}",
       End: "{END}",
       PageUp: "{PGUP}",
       PageDown: "{PGDN}",
       Space: " ",
+      " ": " ",
     };
 
     const modifierMap: Record<string, string> = {
@@ -274,7 +281,16 @@ public class WinInputNative {
       Win: "^",
     };
 
-    const sendKeyStr = keyMap[data.key] || modifierMap[data.key];
+    // Special keys, modifiers, or single character / digit fallback
+    let sendKeyStr = keyMap[data.key];
+    if (!sendKeyStr) {
+      if (modifierMap[data.key]) {
+        sendKeyStr = modifierMap[data.key];
+      } else if (data.key && data.key.length === 1) {
+        sendKeyStr = this.escapeForSendKeys(data.key);
+      }
+    }
+
     if (!sendKeyStr) {
       return;
     }

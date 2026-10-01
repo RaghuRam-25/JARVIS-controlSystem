@@ -10,7 +10,8 @@
  * automationExecutor directly. Those run only inside the Windows Host Agent.
  *
  * Control events are RELAYED to the authenticated Windows Host socket using
- * "host:control:*" events. The Host Agent executes them locally.
+ * both direct ("control:*") and namespaced ("host:control:*") events.
+ * The Host Agent executes them locally on Windows.
  */
 
 import { Server as SocketIOServer, Socket } from "socket.io";
@@ -51,8 +52,15 @@ export function setupSocketHandlers(io: SocketIOServer) {
         ...data,
         token: pairingManager.consumeTokenForRequest(data.requestId) ?? undefined,
       });
+      io.to("host-room").emit("pairing:approved", {
+        requestId: data.requestId,
+        sessionId: data.sessionId,
+        clientName: data.clientName,
+        deviceType: data.deviceType,
+        clientFingerprint: data.clientFingerprint,
+      });
     } else {
-      // No known socket to deliver the token to; do not broadcast secrets.
+      // No known socket to deliver the token to; broadcast without token.
       io.emit("pairing:approved", {
         requestId: data.requestId,
         sessionId: data.sessionId,
@@ -64,26 +72,42 @@ export function setupSocketHandlers(io: SocketIOServer) {
   });
 
   pairingManager.on("pairing_rejected", (data) => {
-    io.emit("pairing:rejected", data);
+    const target = pairingManager.getSocketIdForRequest(data.requestId);
+    if (target) {
+      io.to(target).emit("pairing:rejected", data);
+    }
+    io.to("host-room").emit("pairing:rejected", data);
   });
 
   pairingManager.on("pairing_cancelled", (data) => {
     io.to("host-room").emit("pairing:cancelled", data);
-    io.emit("pairing:cancelled", data);
   });
 
   pairingManager.on("session_revoked", (data) => {
-    io.emit("session:revoked", data);
+    io.to(`session-${data.sessionId}`).emit("session:revoked", data);
+    io.to("host-room").emit("session:revoked", data);
   });
 
-  pairingManager.on("all_sessions_revoked", (data) => {
+  pairingManager.on("sessions_revoked_all", (data) => {
     io.emit("session:revoked_all", data);
   });
 
-  // ─── Terminal output relay: Host Agent → Railway → Controller ────────────
-  // When the Windows Host Agent sends terminal data back to Railway via its
-  // bridge socket, Railway forwards it to the matching controller socket(s).
-  // This is handled inline in the host socket's event handlers below.
+  /**
+   * Resolves the target room or socket ID for the Windows Host Agent.
+   * Prefers "windows-host-room" (dedicated daemon bridge), then "host-room",
+   * then screenStreamManager.getHostSocketId().
+   */
+  const getWindowsHostTarget = (): string | null => {
+    const winRoom = io.sockets.adapter.rooms.get("windows-host-room");
+    if (winRoom && winRoom.size > 0) {
+      return "windows-host-room";
+    }
+    const hostRoom = io.sockets.adapter.rooms.get("host-room");
+    if (hostRoom && hostRoom.size > 0) {
+      return "host-room";
+    }
+    return screenStreamManager.getHostSocketId();
+  };
 
   // ─── Connection Handler ──────────────────────────────────────────────────
 
@@ -101,53 +125,80 @@ export function setupSocketHandlers(io: SocketIOServer) {
     const isHostCandidate = Boolean(auth.isHost) || query.isHost === "true";
     const isHost = isHostCandidate && verifyHostCredential(hostCredential);
 
+    const isHostAgent =
+      isHost &&
+      (Boolean(auth.isHostAgent) ||
+        auth.role === "host-agent" ||
+        auth.clientType === "host-agent" ||
+        query.isHostAgent === "true" ||
+        query.role === "host-agent");
+
     let session: AuthSession | null = null;
 
     if (isHost) {
-      // ─── Windows Host Agent Registration ──────────────────────────────
+      // ─── Windows Host Agent & Host UI Registration ────────────────────
       socket.join("host-room");
-      screenStreamManager.registerHost(socket.id);
-      console.log(`[JARVIS RELAY] Windows Host Agent registered: socket=${socket.id}`);
+
+      if (isHostAgent) {
+        socket.join("windows-host-room");
+        screenStreamManager.registerHost(socket.id);
+        console.log(`[JARVIS RELAY] Windows Host Agent registered: socket=${socket.id}`);
+      } else {
+        socket.join("host-ui-room");
+        screenStreamManager.registerHost(socket.id);
+        console.log(`[JARVIS RELAY] Web Host Deck registered: socket=${socket.id}`);
+      }
 
       // Forward terminal output from Host Agent back to controller sockets
-      socket.on("host:terminal:data", ({ sessionId, data }: { sessionId: string; data: string }) => {
+      const handleTerminalData = ({ sessionId, data }: { sessionId: string; data: string }) => {
         io.to(`term-${sessionId}`).emit("terminal:data", { sessionId, data });
-      });
+      };
+      socket.on("host:terminal:data", handleTerminalData);
+      socket.on("terminal:data", handleTerminalData);
 
-      socket.on("host:terminal:exit", ({ sessionId, code, signal }: { sessionId: string; code: number | null; signal: string | null }) => {
+      const handleTerminalExit = ({ sessionId, code, signal }: { sessionId: string; code: number | null; signal: string | null }) => {
         io.to(`term-${sessionId}`).emit("terminal:exit", { sessionId, code, signal });
-      });
+      };
+      socket.on("host:terminal:exit", handleTerminalExit);
+      socket.on("terminal:exit", handleTerminalExit);
 
-      socket.on("host:terminal:ready", (data: { sessionId: string; cols: number; rows: number }) => {
-        // Forward to whoever is waiting for terminal ready in term-room
+      const handleTerminalReady = (data: { sessionId: string; cols: number; rows: number }) => {
         io.to(`term-${data.sessionId}`).emit("terminal:ready", data);
-      });
+      };
+      socket.on("host:terminal:ready", handleTerminalReady);
+      socket.on("terminal:ready", handleTerminalReady);
 
       // Voice result relay: Host → Railway → Controller
-      socket.on("host:voice:result", ({ intent, result }: { intent: any; result: any }) => {
-        // Broadcast result to all authenticated controllers
+      const handleVoiceResult = (payload: any) => {
+        const result = payload?.result || payload;
+        const intent = payload?.intent;
         io.emit("voice:result", result);
         io.to("host-room").emit("voice:executed", { intent, result });
-      });
+      };
+      socket.on("host:voice:result", handleVoiceResult);
+      socket.on("voice:result", handleVoiceResult);
 
       // Screen metrics: Host advertises actual Windows resolution
-      socket.on("host:screen_metrics", (metrics: { width: number; height: number; scaleFactor: number }) => {
-        // Broadcast to all controllers so they use correct coordinate scaling
+      const handleScreenMetrics = (metrics: { width: number; height: number; scaleFactor: number }) => {
         io.emit("host:screen_metrics", metrics);
-      });
+        io.emit("screen:metrics", metrics);
+      };
+      socket.on("host:screen_metrics", handleScreenMetrics);
+      socket.on("screen:metrics", handleScreenMetrics);
 
       socket.on("disconnect", () => {
         screenStreamManager.unregisterHost(socket.id);
-        console.log(`[JARVIS RELAY] Windows Host Agent disconnected: socket=${socket.id}`);
-        // Notify all controllers that host went offline
-        io.emit("host:status", { online: false });
+        console.log(`[JARVIS RELAY] Host socket disconnected: socket=${socket.id}`);
+        // If no Windows Host remains, notify controllers
+        const target = getWindowsHostTarget();
+        if (!target) {
+          io.emit("host:status", { online: false });
+        }
       });
 
-      // Notify controllers the host came online
+      // Notify controllers that host is online
       io.emit("host:status", { online: true });
-
     } else if (token) {
-      // ─── Controller Authentication ─────────────────────────────────────
       session = await pairingManager.validateToken(token as string);
       if (!session) {
         socket.emit("auth:error", { message: "Unauthorized: Invalid or expired session token." });
@@ -253,18 +304,23 @@ export function setupSocketHandlers(io: SocketIOServer) {
     };
 
     /**
-     * Finds the active Windows Host socket and relays an event to it.
+     * Finds the active Windows Host socket/room and relays an event to it.
+     * Emits BOTH direct event name (e.g. "control:mouse_click") and prefixed
+     * ("host:control:mouse_click") to guarantee 100% listener compatibility.
      * If no Host is connected, emits HOST_OFFLINE back to the controller.
      */
-    const relayToHost = (hostEvent: string, data: unknown, logLabel: string) => {
-      const hostSocketId = screenStreamManager.getHostSocketId();
-      if (!hostSocketId) {
-        console.warn(`[JARVIS RELAY] ${logLabel} → HOST_OFFLINE (no host connected)`);
-        socket.emit("host:offline", { event: hostEvent, message: "Windows Host Agent is not connected." });
+    const relayToHost = (eventName: string, data: unknown) => {
+      const target = getWindowsHostTarget();
+      if (!target) {
+        console.warn(`[JARVIS RAILWAY] ${eventName} → HOST_OFFLINE (no host connected)`);
+        socket.emit("host:offline", { event: eventName, message: "Windows Host Agent is not connected." });
         return;
       }
-      console.log(`[JARVIS RELAY] ${logLabel} → HOST`);
-      io.to(hostSocketId).emit(hostEvent, data);
+      console.log(`[JARVIS RAILWAY] Forwarding ${eventName} to Host Agent`);
+      io.to(target).emit(eventName, data);
+      if (!eventName.startsWith("host:")) {
+        io.to(target).emit(`host:${eventName}`, data);
+      }
     };
 
     // ─── Mouse & Touch Control (Relay to Windows Host) ────────────────────
@@ -273,7 +329,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = MouseMoveSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:control:mouse_move", parsed.data, "mouse_move");
+          relayToHost("control:mouse_move", parsed.data);
         }
       });
     });
@@ -282,7 +338,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = MouseClickSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:control:mouse_click", parsed.data, "mouse_click");
+          relayToHost("control:mouse_click", parsed.data);
         }
       });
     });
@@ -291,7 +347,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = MouseButtonActionSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:control:mouse_button", parsed.data, "mouse_button");
+          relayToHost("control:mouse_button", parsed.data);
         }
       });
     });
@@ -300,7 +356,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = MouseScrollSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:control:mouse_scroll", parsed.data, "mouse_scroll");
+          relayToHost("control:mouse_scroll", parsed.data);
         }
       });
     });
@@ -311,7 +367,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = KeyboardKeySchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:control:key", parsed.data, "key");
+          relayToHost("control:key", parsed.data);
         }
       });
     });
@@ -320,7 +376,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = KeyboardTypeSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:control:type", parsed.data, "type");
+          relayToHost("control:type", parsed.data);
         }
       });
     });
@@ -332,8 +388,8 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const parsed = TerminalSpawnSchema.safeParse(data || {});
         if (!parsed.success) return;
 
-        const hostSocketId = screenStreamManager.getHostSocketId();
-        if (!hostSocketId) {
+        const target = getWindowsHostTarget();
+        if (!target) {
           socket.emit("host:offline", { event: "terminal:spawn", message: "Windows Host Agent is not connected." });
           return;
         }
@@ -343,11 +399,9 @@ export function setupSocketHandlers(io: SocketIOServer) {
         const spawnData = { ...parsed.data, sessionId };
 
         socket.join(`term-${sessionId}`);
-        console.log(`[JARVIS RELAY] terminal:spawn → HOST (sessionId=${sessionId})`);
-        io.to(hostSocketId).emit("host:terminal:spawn", spawnData);
-
-        // Listen for ready confirmation from host and relay to controller
-        // (handled via host:terminal:ready event from host socket above)
+        console.log(`[JARVIS RAILWAY] Forwarding terminal:spawn to Host Agent (sessionId=${sessionId})`);
+        io.to(target).emit("terminal:spawn", spawnData);
+        io.to(target).emit("host:terminal:spawn", spawnData);
       });
     });
 
@@ -355,7 +409,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalInputSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:terminal:input", parsed.data, "terminal:input");
+          relayToHost("terminal:input", parsed.data);
         }
       });
     });
@@ -364,7 +418,7 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalResizeSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:terminal:resize", parsed.data, "terminal:resize");
+          relayToHost("terminal:resize", parsed.data);
         }
       });
     });
@@ -373,47 +427,29 @@ export function setupSocketHandlers(io: SocketIOServer) {
       requireAuth(() => {
         const parsed = TerminalKillSchema.safeParse(data);
         if (parsed.success) {
-          relayToHost("host:terminal:kill", parsed.data, "terminal:kill");
+          relayToHost("terminal:kill", parsed.data);
         }
       });
     });
 
     // ─── Voice Commands ───────────────────────────────────────────────────
 
-    socket.on("voice:parse", (payload: { text: string; language?: string }) => {
+    socket.on("voice:parse", (payload: { text: string; language?: "en" | "bn" }) => {
       requireAuth(() => {
-        if (!payload || typeof payload.text !== "string") return;
-        // Parsing is stateless — Railway can do this without Windows
-        const intent = voiceEngine.parseTranscript(payload.text, payload.language || "auto");
+        if (!payload?.text) return;
+        const intent = voiceEngine.parseTranscript(payload.text, payload.language);
         socket.emit("voice:parsed", intent);
       });
     });
 
-    socket.on("voice:execute", async (payload) => {
-      requireAuth(async () => {
+    socket.on("voice:execute", (payload) => {
+      requireAuth(() => {
         const parsed = VoiceExecutionRequestSchema.safeParse(payload);
-        if (!parsed.success || !parsed.data.approved) return;
+        if (!parsed.success) return;
 
-        const hostSocketId = screenStreamManager.getHostSocketId();
-        if (!hostSocketId) {
-          console.warn("[JARVIS RELAY] voice:execute → HOST_OFFLINE");
-          socket.emit("host:offline", { event: "voice:execute", message: "Windows Host Agent is not connected." });
-          return;
-        }
-
-        console.log("[JARVIS RELAY] voice:execute → HOST");
-        // Relay the full payload to Windows Host Agent for execution
-        io.to(hostSocketId).emit("host:voice:execute", payload);
-        // Result will come back via host:voice:result → voice:result (see host events above)
+        // Relay voice execution request to Windows Host Agent
+        relayToHost("voice:execute", payload);
       });
-    });
-
-    // ─── Disconnect ───────────────────────────────────────────────────────
-
-    socket.on("disconnect", () => {
-      if (session) {
-        screenStreamManager.unregisterViewer(socket.id);
-      }
     });
   });
 }

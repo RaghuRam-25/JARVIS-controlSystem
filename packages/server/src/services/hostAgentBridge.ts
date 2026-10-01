@@ -4,7 +4,7 @@
  * Runs ONLY on the Windows Host Agent (when IS_HOST_AGENT=true).
  * Establishes an outbound authenticated Socket.IO connection to the Railway
  * Server, then listens for forwarded control events and executes them locally
- * using Windows-only automation services.
+ * using Windows-only automation services (User32.dll, PowerShell, SendInput).
  *
  * Flow:
  *   Controller → Railway Server → (this bridge) → inputAutomation / terminalManager / automationExecutor
@@ -55,7 +55,14 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
   bridgeSocket = ioClient(railwayServerUrl, {
     auth: {
       isHost: true,
+      isHostAgent: true,
+      role: "host-agent",
       hostCredential,
+    },
+    query: {
+      isHost: "true",
+      isHostAgent: "true",
+      role: "host-agent",
     },
     transports: ["polling", "websocket"],
     reconnection: true,
@@ -79,6 +86,7 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
     // Notify Railway of screen metrics so controllers can use correct scaling
     const metrics = inputAutomation.getMetrics();
     socket.emit("host:screen_metrics", metrics);
+    socket.emit("screen:metrics", metrics);
   });
 
   socket.on("disconnect", (reason) => {
@@ -96,55 +104,96 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
     console.error("[JARVIS HOST] Check that JARVIS_SECRET matches the Railway Server JARVIS_SECRET.");
   });
 
-  // ─── Mouse Control ────────────────────────────────────────────────────────
+  // ─── Mouse Control Handlers ───────────────────────────────────────────────
 
-  socket.on("host:control:mouse_move", (data: unknown) => {
+  const handleMouseMove = (data: unknown) => {
+    console.log("[JARVIS HOST] CONTROL RECEIVED: control:mouse_move");
     const parsed = MouseMoveSchema.safeParse(data);
-    if (!parsed.success) return;
-    console.log("[JARVIS WINDOWS] mouse_move executed");
+    if (!parsed.success) {
+      console.warn("[JARVIS HOST] Invalid mouse_move payload:", parsed.error.issues);
+      return;
+    }
     inputAutomation.handleMouseMove(parsed.data);
-  });
+  };
 
-  socket.on("host:control:mouse_click", (data: unknown) => {
+  const handleMouseClick = (data: unknown) => {
+    console.log("[JARVIS HOST] CONTROL RECEIVED: control:mouse_click");
     const parsed = MouseClickSchema.safeParse(data);
-    if (!parsed.success) return;
-    console.log("[JARVIS WINDOWS] mouse_click executed");
+    if (!parsed.success) {
+      console.warn("[JARVIS HOST] Invalid mouse_click payload:", parsed.error.issues);
+      return;
+    }
+    console.log("[JARVIS HOST] Executing Windows mouse click");
     inputAutomation.handleMouseClick(parsed.data);
-  });
+  };
 
-  socket.on("host:control:mouse_button", (data: unknown) => {
+  const handleMouseButton = (data: unknown) => {
+    console.log("[JARVIS HOST] CONTROL RECEIVED: control:mouse_button");
     const parsed = MouseButtonActionSchema.safeParse(data);
-    if (!parsed.success) return;
-    console.log("[JARVIS WINDOWS] mouse_button executed");
+    if (!parsed.success) {
+      console.warn("[JARVIS HOST] Invalid mouse_button payload:", parsed.error.issues);
+      return;
+    }
+    console.log(`[JARVIS HOST] Executing Windows mouse button (${parsed.data.action} ${parsed.data.button})`);
     inputAutomation.handleMouseButtonAction(parsed.data);
-  });
+  };
 
-  socket.on("host:control:mouse_scroll", (data: unknown) => {
+  const handleMouseScroll = (data: unknown) => {
+    console.log("[JARVIS HOST] CONTROL RECEIVED: control:mouse_scroll");
     const parsed = MouseScrollSchema.safeParse(data);
-    if (!parsed.success) return;
-    console.log("[JARVIS WINDOWS] mouse_scroll executed");
+    if (!parsed.success) {
+      console.warn("[JARVIS HOST] Invalid mouse_scroll payload:", parsed.error.issues);
+      return;
+    }
+    console.log("[JARVIS HOST] Executing Windows mouse scroll");
     inputAutomation.handleMouseScroll(parsed.data);
-  });
+  };
 
-  // ─── Keyboard Control ─────────────────────────────────────────────────────
+  socket.on("control:mouse_move", handleMouseMove);
+  socket.on("host:control:mouse_move", handleMouseMove);
 
-  socket.on("host:control:key", (data: unknown) => {
+  socket.on("control:mouse_click", handleMouseClick);
+  socket.on("host:control:mouse_click", handleMouseClick);
+
+  socket.on("control:mouse_button", handleMouseButton);
+  socket.on("host:control:mouse_button", handleMouseButton);
+
+  socket.on("control:mouse_scroll", handleMouseScroll);
+  socket.on("host:control:mouse_scroll", handleMouseScroll);
+
+  // ─── Keyboard Control Handlers ────────────────────────────────────────────
+
+  const handleKey = (data: unknown) => {
+    console.log("[JARVIS HOST] CONTROL RECEIVED: control:key");
     const parsed = KeyboardKeySchema.safeParse(data);
-    if (!parsed.success) return;
-    console.log("[JARVIS WINDOWS] key executed");
+    if (!parsed.success) {
+      console.warn("[JARVIS HOST] Invalid key payload:", parsed.error.issues);
+      return;
+    }
+    console.log(`[JARVIS HOST] Executing Windows key (${parsed.data.key})`);
     inputAutomation.handleKeyboardKey(parsed.data);
-  });
+  };
 
-  socket.on("host:control:type", (data: unknown) => {
+  const handleType = (data: unknown) => {
+    console.log("[JARVIS HOST] CONTROL RECEIVED: control:type");
     const parsed = KeyboardTypeSchema.safeParse(data);
-    if (!parsed.success) return;
-    console.log("[JARVIS WINDOWS] type executed");
+    if (!parsed.success) {
+      console.warn("[JARVIS HOST] Invalid type payload:", parsed.error.issues);
+      return;
+    }
+    console.log("[JARVIS HOST] Executing Windows type text");
     inputAutomation.handleKeyboardType(parsed.data);
-  });
+  };
+
+  socket.on("control:key", handleKey);
+  socket.on("host:control:key", handleKey);
+
+  socket.on("control:type", handleType);
+  socket.on("host:control:type", handleType);
 
   // ─── Terminal (Windows PTY) ───────────────────────────────────────────────
 
-  socket.on("host:terminal:spawn", (data: unknown) => {
+  const handleTerminalSpawn = (data: unknown) => {
     const parsed = TerminalSpawnSchema.safeParse(data || {});
     if (!parsed.success) return;
 
@@ -154,31 +203,48 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
       cols: inst.cols,
       rows: inst.rows,
     });
+    socket.emit("terminal:ready", {
+      sessionId: inst.sessionId,
+      cols: inst.cols,
+      rows: inst.rows,
+    });
     console.log(`[JARVIS WINDOWS] terminal spawned: ${inst.sessionId}`);
-  });
+  };
 
-  socket.on("host:terminal:input", (data: unknown) => {
+  const handleTerminalInput = (data: unknown) => {
     const parsed = TerminalInputSchema.safeParse(data);
     if (!parsed.success) return;
     terminalManager.write(parsed.data.sessionId, parsed.data.data, socket.id);
-  });
+  };
 
-  socket.on("host:terminal:resize", (data: unknown) => {
+  const handleTerminalResize = (data: unknown) => {
     const parsed = TerminalResizeSchema.safeParse(data);
     if (!parsed.success) return;
     terminalManager.resize(parsed.data, socket.id);
-  });
+  };
 
-  socket.on("host:terminal:kill", (data: unknown) => {
+  const handleTerminalKill = (data: unknown) => {
     const parsed = TerminalKillSchema.safeParse(data);
     if (!parsed.success) return;
     terminalManager.kill(parsed.data.sessionId, socket.id);
     console.log(`[JARVIS WINDOWS] terminal killed: ${parsed.data.sessionId}`);
-  });
+  };
+
+  socket.on("terminal:spawn", handleTerminalSpawn);
+  socket.on("host:terminal:spawn", handleTerminalSpawn);
+
+  socket.on("terminal:input", handleTerminalInput);
+  socket.on("host:terminal:input", handleTerminalInput);
+
+  socket.on("terminal:resize", handleTerminalResize);
+  socket.on("host:terminal:resize", handleTerminalResize);
+
+  socket.on("terminal:kill", handleTerminalKill);
+  socket.on("host:terminal:kill", handleTerminalKill);
 
   // ─── Voice Execution ──────────────────────────────────────────────────────
 
-  socket.on("host:voice:execute", async (payload: unknown) => {
+  const handleVoiceExecute = async (payload: unknown) => {
     const parsed = VoiceExecutionRequestSchema.safeParse(payload);
     if (!parsed.success || !parsed.data.approved) return;
 
@@ -193,14 +259,22 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
     const result = await automationExecutor.executeIntent(intent);
     console.log(`[JARVIS WINDOWS] voice executed: ${intent.type} → ${result.success ? "OK" : "FAIL"}`);
     socket.emit("host:voice:result", { intent, result });
-  });
+    socket.emit("voice:result", result);
+  };
+
+  socket.on("voice:execute", handleVoiceExecute);
+  socket.on("host:voice:execute", handleVoiceExecute);
 
   // ─── Screen Metrics Request ───────────────────────────────────────────────
 
-  socket.on("host:request_screen_metrics", () => {
+  const handleMetricsRequest = () => {
     const metrics = inputAutomation.getMetrics();
     socket.emit("host:screen_metrics", metrics);
-  });
+    socket.emit("screen:metrics", metrics);
+  };
+
+  socket.on("host:request_screen_metrics", handleMetricsRequest);
+  socket.on("request_screen_metrics", handleMetricsRequest);
 
   console.log("[JARVIS HOST] Host Agent Bridge event handlers registered");
 }
@@ -209,12 +283,14 @@ export function startHostAgentBridge(railwayServerUrl: string): void {
 terminalManager.on("data", ({ sessionId, data }: { sessionId: string; data: string }) => {
   if (bridgeSocket?.connected) {
     bridgeSocket.emit("host:terminal:data", { sessionId, data });
+    bridgeSocket.emit("terminal:data", { sessionId, data });
   }
 });
 
 terminalManager.on("exit", ({ sessionId, code, signal }: { sessionId: string; code: number | null; signal: string | null }) => {
   if (bridgeSocket?.connected) {
     bridgeSocket.emit("host:terminal:exit", { sessionId, code, signal });
+    bridgeSocket.emit("terminal:exit", { sessionId, code, signal });
   }
 });
 
